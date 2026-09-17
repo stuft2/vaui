@@ -3,8 +3,8 @@ package main
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"vaui/internal/tui"
-	"vaui/internal/vault"
+	"github.com/stuft2/vaui/internal/tui"
+	"github.com/stuft2/vaui/internal/vault"
 )
 
 type config struct {

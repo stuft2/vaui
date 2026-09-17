@@ -1,4 +1,4 @@
-module vaui
+module github.com/stuft2/vaui
 
 go 1.24.0
 
