@@ -4,10 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	tea "github.com/charmbracelet/bubbletea"
-	"vaui/internal/tui"
-	"vaui/internal/vault"
 )
 
 func main() {
@@ -23,12 +19,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	client, err := vault.New(*addr, *token, *namespace, *mount, *insecure)
+	program, err := wire(config{
+		address:   *addr,
+		token:     *token,
+		mount:     *mount,
+		namespace: *namespace,
+		insecure:  *insecure,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	program := tea.NewProgram(tui.New(client), tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
