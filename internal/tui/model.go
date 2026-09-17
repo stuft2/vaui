@@ -10,8 +10,15 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"vaui/internal/vault"
 )
+
+// SecretStore describes the Vault operations the terminal UI consumes.
+type SecretStore interface {
+	List(context.Context, string) ([]string, error)
+	Read(context.Context, string) (map[string]any, error)
+	Write(context.Context, string, map[string]any) error
+	Delete(context.Context, string) error
+}
 
 type mode int
 
@@ -38,7 +45,7 @@ type actionMsg struct {
 }
 
 type Model struct {
-	client        *vault.Client
+	secrets       SecretStore
 	mode          mode
 	prefix        string
 	keys          []string
@@ -60,7 +67,7 @@ var (
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
-func New(client *vault.Client) Model {
+func New(secrets SecretStore) Model {
 	ed := textarea.New()
 	ed.SetWidth(72)
 	ed.SetHeight(16)
@@ -69,7 +76,7 @@ func New(client *vault.Client) Model {
 	name.Placeholder = "path/to/secret"
 	name.CharLimit = 512
 	name.Width = 60
-	return Model{client: client, loading: true, editor: ed, name: name}
+	return Model{secrets: secrets, loading: true, editor: ed, name: name}
 }
 
 func (m Model) Init() tea.Cmd { return m.loadList() }
@@ -280,23 +287,23 @@ func (m Model) View() string {
 
 func (m Model) loadList() tea.Cmd {
 	prefix := m.prefix
-	return func() tea.Msg { keys, err := m.client.List(context.Background(), prefix); return listMsg{keys, err} }
+	return func() tea.Msg { keys, err := m.secrets.List(context.Background(), prefix); return listMsg{keys, err} }
 }
 func (m Model) loadSecret(name string) tea.Cmd {
 	return func() tea.Msg {
-		data, err := m.client.Read(context.Background(), name)
+		data, err := m.secrets.Read(context.Background(), name)
 		return readMsg{name, data, err}
 	}
 }
 func (m Model) writeSecret(name string, data map[string]any) tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.Write(context.Background(), name, data)
+		err := m.secrets.Write(context.Background(), name, data)
 		return actionMsg{"Saved " + name, err}
 	}
 }
 func (m Model) deleteSecret(name string) tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.Delete(context.Background(), name)
+		err := m.secrets.Delete(context.Background(), name)
 		return actionMsg{"Deleted " + name, err}
 	}
 }
