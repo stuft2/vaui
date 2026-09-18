@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,14 @@ func (c *Client) Mounts() []string {
 	return append([]string(nil), c.mounts...)
 }
 func (c *Client) Mount() string { c.mu.RLock(); defer c.mu.RUnlock(); return c.mount }
+func (c *Client) Address() string {
+	value := *c.base
+	value.User = nil
+	value.RawQuery = ""
+	value.Fragment = ""
+	return strings.TrimSuffix(value.String(), "/")
+}
+func (c *Client) Namespace() string { return c.namespace }
 func (c *Client) SelectMount(mount string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -203,7 +212,12 @@ func (c *Client) request(ctx context.Context, method, kind, name string, query m
 	}
 	res, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("Vault request: %w", err)
+		detail := err
+		var urlError *url.Error
+		if errors.As(err, &urlError) {
+			detail = urlError.Err
+		}
+		return fmt.Errorf("Vault connectivity failed: check VAULT_ADDR and network access (%v)", detail)
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
@@ -212,10 +226,20 @@ func (c *Client) request(ctx context.Context, method, kind, name string, query m
 			Errors []string `json:"errors"`
 		}
 		_ = json.Unmarshal(message, &payload)
+		details := res.Status
 		if len(payload.Errors) > 0 {
-			return fmt.Errorf("Vault: %s", strings.Join(payload.Errors, "; "))
+			details = strings.Join(payload.Errors, "; ")
 		}
-		return fmt.Errorf("Vault: %s", res.Status)
+		switch res.StatusCode {
+		case http.StatusUnauthorized:
+			return fmt.Errorf("Vault authentication failed: log in again or provide a valid token (%s)", details)
+		case http.StatusForbidden:
+			return fmt.Errorf("Vault permission denied: request access for this mount and path (%s)", details)
+		case http.StatusNotFound:
+			return fmt.Errorf("Vault path not found: verify the mount and secret path (%s)", details)
+		default:
+			return fmt.Errorf("Vault request failed: %s", details)
+		}
 	}
 	if target != nil {
 		if err := json.NewDecoder(res.Body).Decode(target); err != nil {

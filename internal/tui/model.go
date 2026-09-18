@@ -31,6 +31,8 @@ type SecretStore interface {
 	Mounts() []string
 	Mount() string
 	SelectMount(string) error
+	Address() string
+	Namespace() string
 }
 
 type mode int
@@ -50,6 +52,7 @@ const (
 	directPath
 	recentPaths
 	mountPicker
+	help
 )
 
 type listMsg struct {
@@ -115,6 +118,7 @@ type Model struct {
 	pathInput      textinput.Model
 	pickerCursor   int
 	recent         []string
+	helpReturn     mode
 }
 
 var (
@@ -249,6 +253,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "ctrl+c" {
 		return m, tea.Quit
+	}
+	if key.String() == "?" && m.mode != help {
+		m.helpReturn, m.mode = m.mode, help
+		return m, nil
+	}
+	if m.mode == help {
+		if key.String() == "?" || key.String() == "esc" {
+			m.mode = m.helpReturn
+		}
+		return m, nil
 	}
 	m.err = nil
 	m.status = ""
@@ -584,6 +598,11 @@ func (m Model) View() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("VAUI — Vault secrets"))
 	b.WriteString("\n")
+	namespace := m.secrets.Namespace()
+	if namespace == "" {
+		namespace = "(root)"
+	}
+	b.WriteString(dimStyle.Render(fmt.Sprintf("Vault: %s • Namespace: %s • Mount: %s", m.secrets.Address(), namespace, m.secrets.Mount())) + "\n")
 	if m.loading {
 		b.WriteString(dimStyle.Render("Working…"))
 		b.WriteString("\n")
@@ -598,11 +617,6 @@ func (m Model) View() string {
 	}
 	switch m.mode {
 	case browse, filtering:
-		location := "/"
-		if m.prefix != "" {
-			location += m.prefix
-		}
-		b.WriteString("Mount: " + m.secrets.Mount() + "\n")
 		b.WriteString("Path: " + breadcrumb(m.prefix) + "\n\n")
 		if m.mode == filtering {
 			b.WriteString("Filter: " + m.filter.View() + "\n\n")
@@ -739,8 +753,39 @@ func (m Model) View() string {
 		b.WriteString(m.pickerView("Recent paths", m.recent))
 	case mountPicker:
 		b.WriteString(m.pickerView("Select mount", m.secrets.Mounts()))
+	case help:
+		b.WriteString("\n" + titleStyle.Render("Help") + "\n\n")
+		b.WriteString(m.helpText(m.helpReturn) + "\n\n" + dimStyle.Render("? or esc close"))
 	}
 	return b.String()
+}
+
+func (m Model) helpText(current mode) string {
+	common := "? help • ctrl+c quit"
+	var controls string
+	switch current {
+	case browse:
+		controls = "↑/↓ select • enter open • g go to path • p recent paths • m switch mount • / filter • a add • backspace parent"
+	case filtering:
+		controls = "type to filter • enter apply • esc clear"
+	case view:
+		controls = "↑/↓ select field • r reveal • c copy • e edit • h history • d soft-delete • esc back"
+	case editFields:
+		controls = "↑/↓ select • enter edit • a add • d remove • j raw JSON • ctrl+s save • esc cancel"
+	case editField:
+		controls = "tab switch input • ctrl+s apply • esc cancel"
+	case edit:
+		controls = "edit raw JSON • ctrl+s save • esc structured editor"
+	case history:
+		controls = "↑/↓ select • enter inspect • r restore • u undelete • x permanently destroy • esc back"
+	case directPath:
+		controls = "enter open path • esc cancel"
+	case recentPaths, mountPicker:
+		controls = "↑/↓ select • enter choose • esc cancel"
+	default:
+		controls = "follow the prompt • esc cancel"
+	}
+	return controls + "\n" + common
 }
 
 func (m Model) loadList() tea.Cmd {
