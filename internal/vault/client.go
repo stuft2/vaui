@@ -136,7 +136,15 @@ func optionalTime(value string) *time.Time {
 }
 
 func (c *Client) Delete(ctx context.Context, name string) error {
-	return c.request(ctx, http.MethodDelete, "metadata", name, nil, nil, nil)
+	return c.request(ctx, http.MethodDelete, "data", name, nil, nil, nil)
+}
+
+func (c *Client) Undelete(ctx context.Context, name string, version int) error {
+	return c.request(ctx, http.MethodPost, "undelete", name, nil, map[string]any{"versions": []int{version}}, nil)
+}
+
+func (c *Client) Destroy(ctx context.Context, name string, version int) error {
+	return c.request(ctx, http.MethodPost, "destroy", name, nil, map[string]any{"versions": []int{version}}, nil)
 }
 
 func (c *Client) request(ctx context.Context, method, kind, name string, query map[string]string, body any, target any) error {

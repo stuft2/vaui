@@ -13,18 +13,24 @@ import (
 )
 
 type fakeSecretStore struct {
-	listedPrefix    string
-	listKeys        []string
-	readName        string
-	readVersion     int
-	readValue       secret.Value
-	metadata        secret.Metadata
-	metadataErr     error
-	restoredName    string
-	restoredVersion int
-	writtenName     string
-	writtenData     map[string]any
-	deletedName     string
+	listedPrefix     string
+	listKeys         []string
+	readName         string
+	readVersion      int
+	readValue        secret.Value
+	metadata         secret.Metadata
+	metadataErr      error
+	restoredName     string
+	restoredVersion  int
+	writtenName      string
+	writtenData      map[string]any
+	deletedName      string
+	undeletedName    string
+	undeletedVersion int
+	destroyedName    string
+	destroyedVersion int
+	undeleteErr      error
+	destroyErr       error
 }
 
 func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, error) {
@@ -55,6 +61,14 @@ func (f *fakeSecretStore) Write(_ context.Context, name string, data map[string]
 func (f *fakeSecretStore) Delete(_ context.Context, name string) error {
 	f.deletedName = name
 	return nil
+}
+func (f *fakeSecretStore) Undelete(_ context.Context, name string, version int) error {
+	f.undeletedName, f.undeletedVersion = name, version
+	return f.undeleteErr
+}
+func (f *fakeSecretStore) Destroy(_ context.Context, name string, version int) error {
+	f.destroyedName, f.destroyedVersion = name, version
+	return f.destroyErr
 }
 
 func TestSecretCommands(t *testing.T) {
@@ -92,11 +106,11 @@ func TestSecretCommands(t *testing.T) {
 		t.Fatalf("writeSecret = (%q, %#v, %q)", store.writtenName, store.writtenData, writeResult.text)
 	}
 
-	deleteResult, ok := model.deleteSecret("team/token")().(actionMsg)
+	deleteResult, ok := model.deleteSecret("team/token")().(versionActionMsg)
 	if !ok {
-		t.Fatalf("deleteSecret result has type %T, want actionMsg", model.deleteSecret("team/token")())
+		t.Fatalf("deleteSecret result has type %T, want versionActionMsg", model.deleteSecret("team/token")())
 	}
-	if store.deletedName != "team/token" || deleteResult.text != "Deleted team/token" {
+	if store.deletedName != "team/token" || deleteResult.text != "Soft-deleted current version of team/token" {
 		t.Fatalf("deleteSecret = (%q, %q)", store.deletedName, deleteResult.text)
 	}
 }
@@ -171,6 +185,81 @@ func TestPriorVersionRequiresRestoreBeforeEditing(t *testing.T) {
 	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	if model.mode != view || !strings.Contains(model.status, "restore") {
 		t.Fatalf("prior version edit = mode %v, status %q", model.mode, model.status)
+	}
+}
+
+func TestSoftDeleteConfirmationAndCancellation(t *testing.T) {
+	store := &fakeSecretStore{}
+	model := New(store)
+	model.mode, model.selected = view, "team/token"
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if model.mode != confirmDelete || !strings.Contains(model.View(), "Soft-delete") || !strings.Contains(model.View(), "undeleted") {
+		t.Fatalf("soft-delete confirmation missing recovery wording:\n%s", model.View())
+	}
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if model.mode != view || store.deletedName != "" {
+		t.Fatalf("cancel = mode %v, deleted %q", model.mode, store.deletedName)
+	}
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	result := cmd().(versionActionMsg)
+	if store.deletedName != "team/token" || result.text != "Soft-deleted current version of team/token" {
+		t.Fatalf("soft delete = (%q, %q)", store.deletedName, result.text)
+	}
+	updated, refresh := model.Update(result)
+	model = updated.(Model)
+	if model.mode != history || refresh == nil {
+		t.Fatalf("soft delete result = mode %v, refresh %v; want history refresh", model.mode, refresh)
+	}
+}
+
+func TestHistoryUndeleteAndFailure(t *testing.T) {
+	deletedAt := time.Now()
+	store := &fakeSecretStore{undeleteErr: fmt.Errorf("Vault: permission denied")}
+	model := New(store)
+	model.mode, model.selected = history, "team/token"
+	model.metadata = secret.Metadata{Versions: []secret.Version{{Version: 2, DeletionTime: &deletedAt}}}
+	if !strings.Contains(model.View(), "soft-deleted") {
+		t.Fatalf("history does not distinguish deleted version:\n%s", model.View())
+	}
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
+	msg := cmd().(versionActionMsg)
+	if store.undeletedName != "team/token" || store.undeletedVersion != 2 {
+		t.Fatalf("undelete = (%q, %d)", store.undeletedName, store.undeletedVersion)
+	}
+	updated, _ := model.Update(msg)
+	model = updated.(Model)
+	if model.mode != history || model.err == nil || !strings.Contains(model.err.Error(), "permission denied") {
+		t.Fatalf("undelete failure = mode %v, error %v", model.mode, model.err)
+	}
+}
+
+func TestDestroyRequiresTypedConfirmation(t *testing.T) {
+	store := &fakeSecretStore{}
+	model := New(store)
+	model.mode, model.selected = history, "team/token"
+	model.metadata = secret.Metadata{Versions: []secret.Version{{Version: 2}}}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if model.mode != confirmDestroy || !strings.Contains(model.View(), "cannot be undone") {
+		t.Fatalf("destroy confirmation is not explicit:\n%s", model.View())
+	}
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd != nil || model.err == nil || store.destroyedName != "" {
+		t.Fatalf("empty confirmation destroyed secret: command=%v error=%v name=%q", cmd, model.err, store.destroyedName)
+	}
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+	if model.mode != history {
+		t.Fatalf("cancel mode = %v, want history", model.mode)
+	}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("destroy v2")})
+	model, cmd = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	msg := cmd().(versionActionMsg)
+	if msg.err != nil || store.destroyedName != "team/token" || store.destroyedVersion != 2 {
+		t.Fatalf("destroy = (%q, %d, %v)", store.destroyedName, store.destroyedVersion, msg.err)
 	}
 }
 
