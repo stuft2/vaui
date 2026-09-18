@@ -11,7 +11,7 @@ import (
 func main() {
 	addr := flag.String("addr", env("VAULT_ADDR", "http://127.0.0.1:8200"), "Vault server address")
 	token := flag.String("token", os.Getenv("VAULT_TOKEN"), "Vault token (defaults to VAULT_TOKEN or the Vault CLI login token)")
-	mount := flag.String("mount", defaultMount(), "KV v2 mount")
+	mount := flag.String("mount", strings.Join(defaultMounts(), ","), "KV v2 mount(s), comma-separated")
 	namespace := flag.String("namespace", os.Getenv("VAULT_NAMESPACE"), "Vault Enterprise namespace")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	flag.Parse()
@@ -30,7 +30,7 @@ func main() {
 	program, err := wire(config{
 		address:   *addr,
 		token:     *token,
-		mount:     *mount,
+		mounts:    parseMounts(*mount),
 		namespace: *namespace,
 		insecure:  *insecure,
 	})
@@ -75,7 +75,16 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func defaultMount() string {
-	mounts := strings.Split(env("VAULT_KV2_MOUNTS", "secret"), ",")
-	return strings.TrimSpace(mounts[0])
+func defaultMounts() []string { return parseMounts(env("VAULT_KV2_MOUNTS", "secret")) }
+func parseMounts(value string) []string {
+	seen := map[string]bool{}
+	var mounts []string
+	for _, raw := range strings.Split(value, ",") {
+		mount := strings.Trim(strings.TrimSpace(raw), "/")
+		if mount != "" && !seen[mount] {
+			seen[mount] = true
+			mounts = append(mounts, mount)
+		}
+	}
+	return mounts
 }

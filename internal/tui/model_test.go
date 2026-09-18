@@ -31,7 +31,23 @@ type fakeSecretStore struct {
 	destroyedVersion int
 	undeleteErr      error
 	destroyErr       error
+	mounts           []string
+	mount            string
 }
+
+func (f *fakeSecretStore) Mounts() []string {
+	if len(f.mounts) == 0 {
+		return []string{"secret"}
+	}
+	return f.mounts
+}
+func (f *fakeSecretStore) Mount() string {
+	if f.mount == "" {
+		return f.Mounts()[0]
+	}
+	return f.mount
+}
+func (f *fakeSecretStore) SelectMount(value string) error { f.mount = value; return nil }
 
 func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, error) {
 	f.listedPrefix = prefix
@@ -272,6 +288,54 @@ func TestParent(t *testing.T) {
 	}
 }
 
+func TestNormalizePathAndBreadcrumb(t *testing.T) {
+	if got := normalizePath(" /apps//prod/../dev "); got != "apps/dev/" {
+		t.Fatalf("normalizePath = %q", got)
+	}
+	if got := breadcrumb("apps/dev/"); got != "/ › apps › dev" {
+		t.Fatalf("breadcrumb = %q", got)
+	}
+}
+
+func TestRecentPathsAreUniqueAndBounded(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	for i := 0; i < 12; i++ {
+		model.visit(fmt.Sprintf("team/%02d", i))
+	}
+	model.visit("team/05")
+	if len(model.recent) != 10 || model.recent[0] != "team/05/" {
+		t.Fatalf("recent = %#v", model.recent)
+	}
+}
+
+func TestDirectPathAndAncestorNavigation(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	model.pathInput.SetValue("/apps/prod/")
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.prefix != "apps/prod/" || cmd == nil {
+		t.Fatalf("direct path = %q, command %v", model.prefix, cmd)
+	}
+	model, cmd = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyBackspace})
+	if model.prefix != "apps/" || cmd == nil {
+		t.Fatalf("ancestor = %q, command %v", model.prefix, cmd)
+	}
+}
+
+func TestMultipleMountsRequireSelectionAndResetPathState(t *testing.T) {
+	store := &fakeSecretStore{mounts: []string{"secret", "shared"}}
+	model := New(store)
+	model.prefix, model.recent = "apps/", []string{"apps/"}
+	if model.mode != mountPicker || model.Init() != nil {
+		t.Fatalf("initial mode = %v", model.mode)
+	}
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if store.mount != "shared" || model.prefix != "" || len(model.recent) != 0 || cmd == nil {
+		t.Fatalf("mount switch = mount %q prefix %q recent %#v", store.mount, model.prefix, model.recent)
+	}
+}
+
 func TestFilterPaths(t *testing.T) {
 	model := New(&fakeSecretStore{})
 	model.keys = []string{"apps/", "argocd/", "token"}
@@ -340,8 +404,8 @@ func TestPathListScrollsToKeepSelectionVisible(t *testing.T) {
 	}
 
 	view := model.View()
-	if model.listOffset != 8 {
-		t.Fatalf("list offset = %d, want 8", model.listOffset)
+	if model.listOffset != 9 {
+		t.Fatalf("list offset = %d, want 9", model.listOffset)
 	}
 	if strings.Contains(view, "item-00") || !strings.Contains(view, "> item-10") {
 		t.Fatalf("scrolled view does not keep selection visible:\n%s", view)
@@ -366,8 +430,8 @@ func TestPathListResizeKeepsValidViewport(t *testing.T) {
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
 	model = updated.(Model)
 
-	if model.cursor != 9 || model.listOffset != 3 {
-		t.Fatalf("resized viewport = (cursor %d, offset %d), want (9, 3)", model.cursor, model.listOffset)
+	if model.cursor != 9 || model.listOffset != 4 {
+		t.Fatalf("resized viewport = (cursor %d, offset %d), want (9, 4)", model.cursor, model.listOffset)
 	}
 	if !strings.Contains(model.View(), "> item-09") {
 		t.Fatalf("resized view lost selection:\n%s", model.View())
