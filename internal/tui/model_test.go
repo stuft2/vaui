@@ -9,12 +9,14 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stuft2/vaui/internal/secret"
 )
 
 type fakeSecretStore struct {
 	listedPrefix     string
 	listKeys         []string
+	listErr          error
 	readName         string
 	readVersion      int
 	readValue        secret.Value
@@ -53,7 +55,7 @@ func (f *fakeSecretStore) Namespace() string              { return "team" }
 
 func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, error) {
 	f.listedPrefix = prefix
-	return f.listKeys, nil
+	return f.listKeys, f.listErr
 }
 
 func (f *fakeSecretStore) Read(_ context.Context, name string, version int) (secret.Value, error) {
@@ -315,12 +317,22 @@ func TestDirectPathAndAncestorNavigation(t *testing.T) {
 	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	model.pathInput.SetValue("/apps/prod/")
 	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
-	if model.prefix != "apps/prod/" || cmd == nil {
+	if model.prefix != "" || cmd == nil {
 		t.Fatalf("direct path = %q, command %v", model.prefix, cmd)
 	}
+	updated, _ := model.Update(cmd())
+	model = updated.(Model)
+	if model.prefix != "apps/prod/" {
+		t.Fatalf("loaded direct path = %q", model.prefix)
+	}
 	model, cmd = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyBackspace})
-	if model.prefix != "apps/" || cmd == nil {
+	if model.prefix != "apps/prod/" || cmd == nil {
 		t.Fatalf("ancestor = %q, command %v", model.prefix, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+	if model.prefix != "apps/" {
+		t.Fatalf("loaded ancestor = %q", model.prefix)
 	}
 }
 
@@ -398,14 +410,16 @@ func TestFilterNavigationUsesVisiblePaths(t *testing.T) {
 	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
 	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if model.prefix != "argocd/" {
-		t.Fatalf("prefix = %q, want %q", model.prefix, "argocd/")
-	}
 	if model.filter.Value() != "" {
 		t.Fatalf("filter = %q, want cleared after navigation", model.filter.Value())
 	}
 	if cmd == nil {
 		t.Fatal("opening a filtered directory returned no load command")
+	}
+	updated, _ := model.Update(cmd())
+	model = updated.(Model)
+	if model.prefix != "argocd/" {
+		t.Fatalf("prefix = %q, want %q", model.prefix, "argocd/")
 	}
 }
 
@@ -449,6 +463,40 @@ func TestPathListScrollsToKeepSelectionVisible(t *testing.T) {
 	if lines := len(strings.Split(view, "\n")); lines > model.height {
 		t.Fatalf("rendered %d lines in a %d-line terminal:\n%s", lines, model.height, view)
 	}
+}
+
+func TestDeniedPathKeepsCurrentListingAndHeaderVisible(t *testing.T) {
+	store := &fakeSecretStore{listKeys: []string{"restricted/", "token"}}
+	model := New(store)
+	model.loading = false
+	model.keys = store.listKeys
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 44, Height: 10})
+	model = updated.(Model)
+
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	store.listErr = fmt.Errorf("Vault permission denied: request access for this mount and path (permission denied)")
+	result := cmd().(listMsg)
+	updated, _ = model.Update(result)
+	model = updated.(Model)
+
+	if model.prefix != "" {
+		t.Fatalf("denied navigation changed path to %q", model.prefix)
+	}
+	view := model.View()
+	if !strings.HasPrefix(view, titleStyle.Render("VAUI — Vault secrets")+"\n") {
+		t.Fatalf("denied navigation lost header:\n%s", view)
+	}
+	if rows := terminalRows(view, model.width); rows > model.height {
+		t.Fatalf("denied navigation rendered %d rows in a %d-row terminal:\n%s", rows, model.height, view)
+	}
+}
+
+func terminalRows(view string, width int) int {
+	rows := 0
+	for _, line := range strings.Split(view, "\n") {
+		rows += max(1, (lipgloss.Width(line)+width-1)/width)
+	}
+	return rows
 }
 
 func TestPathListResizeKeepsValidViewport(t *testing.T) {
