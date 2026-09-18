@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -28,6 +29,8 @@ const (
 	browse mode = iota
 	filtering
 	view
+	editFields
+	editField
 	edit
 	addName
 	confirmDelete
@@ -52,24 +55,29 @@ type copyMsg struct {
 }
 
 type Model struct {
-	secrets       SecretStore
-	mode          mode
-	prefix        string
-	keys          []string
-	cursor        int
-	listOffset    int
-	selected      string
-	data          map[string]any
-	fieldCursor   int
-	revealed      map[string]bool
-	status        string
-	err           error
-	loading       bool
-	width, height int
-	editor        textarea.Model
-	name          textinput.Model
-	filter        textinput.Model
-	copyValue     func(string) error
+	secrets        SecretStore
+	mode           mode
+	prefix         string
+	keys           []string
+	cursor         int
+	listOffset     int
+	selected       string
+	data           map[string]any
+	draft          map[string]any
+	fieldCursor    int
+	revealed       map[string]bool
+	originalField  string
+	fieldName      textinput.Model
+	fieldValue     textarea.Model
+	fieldNameFocus bool
+	status         string
+	err            error
+	loading        bool
+	width, height  int
+	editor         textarea.Model
+	name           textinput.Model
+	filter         textinput.Model
+	copyValue      func(string) error
 }
 
 var (
@@ -92,8 +100,18 @@ func New(secrets SecretStore) Model {
 	filter.Placeholder = "filter current path"
 	filter.CharLimit = 256
 	filter.Width = 60
+	fieldName := textinput.New()
+	fieldName.Placeholder = "field name"
+	fieldName.CharLimit = 512
+	fieldName.Width = 60
+	fieldValue := textarea.New()
+	fieldValue.Placeholder = `JSON value, for example "secret", 42, true, or {"key":"value"}`
+	fieldValue.SetWidth(72)
+	fieldValue.SetHeight(8)
+	fieldValue.ShowLineNumbers = false
 	return Model{
 		secrets: secrets, loading: true, editor: ed, name: name, filter: filter,
+		fieldName: fieldName, fieldValue: fieldValue,
 		revealed: make(map[string]bool), copyValue: clipboard.WriteAll,
 	}
 }
@@ -106,6 +124,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.editor.SetWidth(max(30, min(100, msg.Width-4)))
 		m.editor.SetHeight(max(6, msg.Height-9))
+		m.fieldValue.SetWidth(max(30, min(100, msg.Width-4)))
+		m.fieldValue.SetHeight(max(4, msg.Height-12))
 		m.ensureCursorVisible()
 	case listMsg:
 		m.loading = false
@@ -241,26 +261,90 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.copySelectedValue(fields[m.fieldCursor])
 			}
 		case "e":
-			raw, _ := json.MarshalIndent(m.data, "", "  ")
+			m.startStructuredEdit()
+		case "d":
+			m.mode = confirmDelete
+		}
+	case editFields:
+		fields := sortedKeys(m.draft)
+		switch key.String() {
+		case "esc":
+			m.mode = view
+		case "up", "k":
+			if m.fieldCursor > 0 {
+				m.fieldCursor--
+			}
+		case "down":
+			if m.fieldCursor+1 < len(fields) {
+				m.fieldCursor++
+			}
+		case "enter":
+			if len(fields) > 0 {
+				m.startFieldEdit(fields[m.fieldCursor], m.draft[fields[m.fieldCursor]])
+				return m, textinput.Blink
+			}
+		case "a":
+			m.startFieldEdit("", "value")
+			return m, textinput.Blink
+		case "d":
+			if len(fields) > 0 {
+				delete(m.draft, fields[m.fieldCursor])
+				m.fieldCursor = min(m.fieldCursor, max(0, len(fields)-2))
+			}
+		case "j":
+			raw, _ := json.MarshalIndent(m.draft, "", "  ")
 			m.editor.SetValue(string(raw))
 			m.editor.Focus()
 			m.mode = edit
 			return m, textarea.Blink
-		case "d":
-			m.mode = confirmDelete
+		case "ctrl+s":
+			m.loading = true
+			return m, m.writeSecret(m.selected, m.draft)
 		}
+	case editField:
+		switch key.String() {
+		case "esc":
+			m.fieldName.Blur()
+			m.fieldValue.Blur()
+			m.mode = editFields
+			return m, nil
+		case "tab", "shift+tab":
+			m.fieldNameFocus = !m.fieldNameFocus
+			if m.fieldNameFocus {
+				m.fieldValue.Blur()
+				m.fieldName.Focus()
+				return m, textinput.Blink
+			}
+			m.fieldName.Blur()
+			m.fieldValue.Focus()
+			return m, textarea.Blink
+		case "ctrl+s":
+			if err := m.applyFieldEdit(); err != nil {
+				m.err = err
+				return m, nil
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		if m.fieldNameFocus {
+			m.fieldName, cmd = m.fieldName.Update(key)
+		} else {
+			m.fieldValue, cmd = m.fieldValue.Update(key)
+		}
+		return m, cmd
 	case edit:
 		if key.String() == "esc" {
 			m.editor.Blur()
-			m.mode = view
+			m.mode = editFields
 			return m, nil
 		}
 		if key.String() == "ctrl+s" {
-			var data map[string]any
-			if err := json.Unmarshal([]byte(m.editor.Value()), &data); err != nil {
+			data, err := decodeSecretJSON(m.editor.Value())
+			if err != nil {
 				m.err = fmt.Errorf("invalid JSON: %w", err)
 				return m, nil
 			}
+			m.draft = data
 			m.loading = true
 			m.editor.Blur()
 			return m, m.writeSecret(m.selected, data)
@@ -281,11 +365,11 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.selected = secretName
-			m.editor.SetValue("{\n  \"key\": \"value\"\n}")
-			m.editor.Focus()
+			m.data = make(map[string]any)
 			m.name.Blur()
-			m.mode = edit
-			return m, textarea.Blink
+			m.startStructuredEdit()
+			m.startFieldEdit("", "value")
+			return m, textinput.Blink
 		}
 		var cmd tea.Cmd
 		m.name, cmd = m.name.Update(key)
@@ -378,10 +462,33 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 		b.WriteString("\n" + dimStyle.Render("↑/↓ select • r reveal/hide • c copy • e edit • d delete • esc back"))
+	case editFields:
+		b.WriteString("\nEditing fields: " + m.selected + "\n\n")
+		fields := sortedKeys(m.draft)
+		if len(fields) == 0 {
+			b.WriteString(dimStyle.Render("No fields. Press a to add one."))
+			b.WriteString("\n")
+		}
+		for i, field := range fields {
+			marker := "  "
+			style := lipgloss.NewStyle()
+			if i == m.fieldCursor {
+				marker = "> "
+				style = selectedStyle
+			}
+			b.WriteString(style.Render(fmt.Sprintf("%s%s: %s", marker, field, displayValue(m.draft[field]))))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter edit • a add • d remove • j raw JSON • ctrl+s save • esc cancel"))
+	case editField:
+		b.WriteString("\nEdit field: " + m.selected + "\n\n")
+		b.WriteString("Name:\n" + m.fieldName.View() + "\n\n")
+		b.WriteString("JSON value:\n" + m.fieldValue.View())
+		b.WriteString("\n" + dimStyle.Render("tab switch field • ctrl+s apply • esc cancel"))
 	case edit:
-		b.WriteString("\nEditing: " + m.selected + "\n")
+		b.WriteString("\nRaw JSON: " + m.selected + "\n")
 		b.WriteString(m.editor.View())
-		b.WriteString("\n" + dimStyle.Render("ctrl+s save • esc cancel"))
+		b.WriteString("\n" + dimStyle.Render("ctrl+s save • esc structured editor"))
 	case addName:
 		b.WriteString("\nNew secret path:\n")
 		b.WriteString(m.name.View())
@@ -428,12 +535,138 @@ func (m Model) copySelectedValue(key string) tea.Cmd {
 	}
 }
 func (m Model) secretKeys() []string {
-	keys := make([]string, 0, len(m.data))
-	for key := range m.data {
+	return sortedKeys(m.data)
+}
+func sortedKeys(data map[string]any) []string {
+	keys := make([]string, 0, len(data))
+	for key := range data {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	return keys
+}
+func (m *Model) startStructuredEdit() {
+	m.draft = make(map[string]any, len(m.data))
+	for key, value := range m.data {
+		m.draft[key] = value
+	}
+	m.fieldCursor = min(m.fieldCursor, max(0, len(m.draft)-1))
+	m.mode = editFields
+}
+func (m *Model) startFieldEdit(key string, value any) {
+	m.originalField = key
+	m.fieldName.SetValue(key)
+	m.fieldName.CursorEnd()
+	m.fieldValue.SetValue(displayValue(value))
+	m.fieldNameFocus = true
+	m.fieldValue.Blur()
+	m.fieldName.Focus()
+	m.mode = editField
+}
+func (m *Model) applyFieldEdit() error {
+	key := m.fieldName.Value()
+	if strings.TrimSpace(key) == "" {
+		return fmt.Errorf("field name cannot be empty")
+	}
+	if key != m.originalField {
+		if _, exists := m.draft[key]; exists {
+			return fmt.Errorf("field %q already exists", key)
+		}
+	}
+	value, err := decodeJSON(m.fieldValue.Value())
+	if err != nil {
+		return fmt.Errorf("invalid JSON value: %w", err)
+	}
+	if m.originalField != "" && key != m.originalField {
+		delete(m.draft, m.originalField)
+	}
+	m.draft[key] = value
+	for i, field := range sortedKeys(m.draft) {
+		if field == key {
+			m.fieldCursor = i
+			break
+		}
+	}
+	m.fieldName.Blur()
+	m.fieldValue.Blur()
+	m.mode = editFields
+	return nil
+}
+func decodeSecretJSON(raw string) (map[string]any, error) {
+	value, err := decodeJSON(raw)
+	if err != nil {
+		return nil, err
+	}
+	data, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("secret must be a JSON object")
+	}
+	return data, nil
+}
+func decodeJSON(raw string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	value, err := decodeJSONToken(decoder)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("unexpected trailing JSON value")
+		}
+		return nil, err
+	}
+	return value, nil
+}
+func decodeJSONToken(decoder *json.Decoder) (any, error) {
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return token, nil
+	}
+	switch delim {
+	case '{':
+		object := make(map[string]any)
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return nil, err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return nil, fmt.Errorf("object key is not a string")
+			}
+			if _, exists := object[key]; exists {
+				return nil, fmt.Errorf("duplicate field %q", key)
+			}
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			object[key] = value
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return object, nil
+	case '[':
+		var array []any
+		for decoder.More() {
+			value, err := decodeJSONToken(decoder)
+			if err != nil {
+				return nil, err
+			}
+			array = append(array, value)
+		}
+		if _, err := decoder.Token(); err != nil {
+			return nil, err
+		}
+		return array, nil
+	default:
+		return nil, fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
 }
 func displayValue(value any) string {
 	raw, err := json.Marshal(value)
