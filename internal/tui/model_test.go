@@ -214,6 +214,91 @@ func TestFilteringResetsPathListViewport(t *testing.T) {
 	}
 }
 
+func TestSecretValuesAreMaskedByDefault(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.mode = view
+	model.selected = "apps/service"
+	model.data = map[string]any{
+		"enabled":  true,
+		"password": "top-secret",
+	}
+
+	view := model.View()
+	if strings.Contains(view, "top-secret") || strings.Contains(view, "true") {
+		t.Fatalf("secret view exposed values by default:\n%s", view)
+	}
+	if !strings.Contains(view, "enabled: ••••••••") || !strings.Contains(view, "password: ••••••••") {
+		t.Fatalf("secret view did not show masked fields:\n%s", view)
+	}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	view = model.View()
+	if !strings.Contains(view, "enabled: true") || strings.Contains(view, "top-secret") {
+		t.Fatalf("revealed view did not render only the selected non-string value:\n%s", view)
+	}
+}
+
+func TestRevealAndHideSelectedSecretValue(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.mode = view
+	model.data = map[string]any{"password": "top-secret", "username": "person"}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if !strings.Contains(model.View(), `password: "top-secret"`) {
+		t.Fatalf("revealed view did not show selected value:\n%s", model.View())
+	}
+	if strings.Contains(model.View(), `username: "person"`) {
+		t.Fatalf("revealed view exposed an unselected value:\n%s", model.View())
+	}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if strings.Contains(model.View(), "top-secret") {
+		t.Fatalf("hidden view still exposed selected value:\n%s", model.View())
+	}
+}
+
+func TestCopySelectedSecretValue(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.mode = view
+	model.data = map[string]any{
+		"config":   map[string]any{"enabled": true},
+		"password": "top-secret",
+	}
+	var copied string
+	model.copyValue = func(value string) error {
+		copied = value
+		return nil
+	}
+
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	if cmd == nil {
+		t.Fatal("copy returned no command")
+	}
+	updated, _ := model.Update(cmd())
+	model = updated.(Model)
+
+	if copied != `{"enabled":true}` {
+		t.Fatalf("copied value = %q, want compact JSON", copied)
+	}
+	if model.mode != view || model.status != "Copied value for config" {
+		t.Fatalf("copy result = (mode %v, status %q)", model.mode, model.status)
+	}
+	if strings.Contains(model.status, copied) {
+		t.Fatalf("copy status exposed copied value: %q", model.status)
+	}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	model.copyValue = func(value string) error {
+		copied = value
+		return nil
+	}
+	_, cmd = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
+	cmd()
+	if copied != "top-secret" {
+		t.Fatalf("copied string = %q, want unquoted value", copied)
+	}
+}
+
 func updateWithKey(t *testing.T, model Model, key tea.KeyMsg) (Model, tea.Cmd) {
 	t.Helper()
 	updated, cmd := model.handleKey(key)
