@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -144,6 +145,72 @@ func TestEscapeClearsFilter(t *testing.T) {
 
 	if model.mode != browse || model.filter.Value() != "" || len(model.visibleKeys()) != 2 {
 		t.Fatalf("cleared filter = (%v, %q, %v)", model.mode, model.filter.Value(), model.visibleKeys())
+	}
+}
+
+func TestPathListScrollsToKeepSelectionVisible(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.loading = false
+	for i := range 20 {
+		model.keys = append(model.keys, fmt.Sprintf("item-%02d", i))
+	}
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+	model = updated.(Model)
+	for range 10 {
+		model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	}
+
+	view := model.View()
+	if model.listOffset != 8 {
+		t.Fatalf("list offset = %d, want 8", model.listOffset)
+	}
+	if strings.Contains(view, "item-00") || !strings.Contains(view, "> item-10") {
+		t.Fatalf("scrolled view does not keep selection visible:\n%s", view)
+	}
+	if !strings.Contains(view, "11/20") {
+		t.Fatalf("scrolled view does not show position:\n%s", view)
+	}
+	if lines := len(strings.Split(view, "\n")); lines > model.height {
+		t.Fatalf("rendered %d lines in a %d-line terminal:\n%s", lines, model.height, view)
+	}
+}
+
+func TestPathListResizeKeepsValidViewport(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.loading = false
+	for i := range 10 {
+		model.keys = append(model.keys, fmt.Sprintf("item-%02d", i))
+	}
+	model.cursor = 9
+	model.listOffset = 7
+
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	model = updated.(Model)
+
+	if model.cursor != 9 || model.listOffset != 3 {
+		t.Fatalf("resized viewport = (cursor %d, offset %d), want (9, 3)", model.cursor, model.listOffset)
+	}
+	if !strings.Contains(model.View(), "> item-09") {
+		t.Fatalf("resized view lost selection:\n%s", model.View())
+	}
+}
+
+func TestFilteringResetsPathListViewport(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.keys = []string{"apps/", "argocd/", "token"}
+	model.cursor = 2
+	model.listOffset = 2
+	model.mode = filtering
+	model.filter.Focus()
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("app")})
+
+	if model.cursor != 0 || model.listOffset != 0 {
+		t.Fatalf("filtered viewport = (cursor %d, offset %d), want (0, 0)", model.cursor, model.listOffset)
+	}
+	if got := model.visibleKeys(); !reflect.DeepEqual(got, []string{"apps/"}) {
+		t.Fatalf("visible keys = %#v, want only apps", got)
 	}
 }
 
