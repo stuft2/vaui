@@ -16,11 +16,11 @@ Make sure the Go binary directory is on your `PATH`, then configure Vault and st
 
 ```sh
 export VAULT_ADDR=https://vault.example.com
-export VAULT_TOKEN=…
+vault login
 vaui
 ```
 
-The default mount is `secret`. Override it with `-mount`, or set `VAUI_MOUNT`. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
+VAUI uses `VAULT_TOKEN` when it is set; otherwise it reads the token saved by `vault login` in `~/.vault-token`. You can also pass `-token` explicitly. The default mount is `secret`. Override it with `-mount`, or set `VAUI_MOUNT`. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
 
 Inside the UI, use the arrow keys to navigate, Enter to open a path or secret, `a` to add, `e` to edit, `d` to delete, and `q` to quit. Secret values are edited as JSON; save with Ctrl+S.
 
@@ -34,7 +34,7 @@ Clone the repository and run the CLI from the project root:
 git clone https://github.com/stuft2/vaui.git
 cd vaui
 export VAULT_ADDR=https://vault.example.com
-export VAULT_TOKEN=…
+vault login
 go run ./cmd/vaui
 ```
 
