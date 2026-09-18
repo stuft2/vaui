@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/stuft2/vaui/internal/vault"
 )
 
 func main() {
@@ -23,7 +25,7 @@ func main() {
 		os.Exit(2)
 	}
 	if *token == "" {
-		fmt.Fprintln(os.Stderr, "Vault token not found; run vault login, set VAULT_TOKEN, or use -token")
+		fmt.Fprintln(os.Stderr, vault.ErrNotLoggedIn)
 		os.Exit(2)
 	}
 

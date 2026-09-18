@@ -3,6 +3,7 @@ package vault
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -174,7 +175,7 @@ func TestActionableVaultErrors(t *testing.T) {
 	tests := []struct {
 		status int
 		want   string
-	}{{http.StatusUnauthorized, "authentication failed"}, {http.StatusForbidden, "permission denied"}, {http.StatusNotFound, "path not found"}}
+	}{{http.StatusForbidden, "permission denied"}, {http.StatusNotFound, "path not found"}}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -185,6 +186,32 @@ func TestActionableVaultErrors(t *testing.T) {
 			client, _ := New(server.URL, "sensitive-token", "", []string{"secret"}, false)
 			_, err := client.Read(context.Background(), "x", 0)
 			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "raw detail") || strings.Contains(err.Error(), "sensitive-token") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestVaultAuthenticationErrorsAreSimple(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		errors []string
+	}{
+		{name: "unauthorized", status: http.StatusUnauthorized, errors: []string{"raw detail"}},
+		{name: "invalid token", status: http.StatusForbidden, errors: []string{"invalid token", "permission denied"}},
+		{name: "missing token", status: http.StatusForbidden, errors: []string{"missing client token"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				json.NewEncoder(w).Encode(map[string]any{"errors": tt.errors})
+			}))
+			defer server.Close()
+			client, _ := New(server.URL, "sensitive-token", "", []string{"secret"}, false)
+			_, err := client.Read(context.Background(), "x", 0)
+			if !errors.Is(err, ErrNotLoggedIn) || err.Error() != "Not logged in to Vault." {
 				t.Fatalf("error = %v", err)
 			}
 		})
@@ -292,5 +319,18 @@ func TestNewReturnsActionableDiscoveryErrors(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestNewReportsInvalidTokenWithoutDiscoveryHints(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]any{"errors": []string{"invalid token", "permission denied"}})
+	}))
+	defer server.Close()
+
+	_, err := New(server.URL, "expired-token", "", nil, false)
+	if !errors.Is(err, ErrNotLoggedIn) || err.Error() != "Not logged in to Vault." {
+		t.Fatalf("error = %v", err)
 	}
 }

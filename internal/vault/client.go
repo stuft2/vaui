@@ -30,6 +30,8 @@ type Client struct {
 	http      *http.Client
 }
 
+var ErrNotLoggedIn = errors.New("Not logged in to Vault.")
+
 func New(address, token, namespace string, mounts []string, insecure bool) (*Client, error) {
 	base, err := url.Parse(address)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
@@ -44,6 +46,9 @@ func New(address, token, namespace string, mounts []string, insecure bool) (*Cli
 	if len(mounts) == 0 {
 		mounts, err = client.discoverKVv2Mounts(context.Background())
 		if err != nil {
+			if errors.Is(err, ErrNotLoggedIn) {
+				return nil, err
+			}
 			return nil, fmt.Errorf("detect KV v2 mounts: %w; configure -mount or VAULT_KV2_MOUNTS", err)
 		}
 		if len(mounts) == 0 {
@@ -72,7 +77,7 @@ func (c *Client) discoverKVv2Mounts(ctx context.Context) ([]string, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("Vault returned %s", res.Status)
+		return nil, responseError(res)
 	}
 	var response struct {
 		Data struct {
@@ -270,25 +275,7 @@ func (c *Client) request(ctx context.Context, method, kind, name string, query m
 	}
 	defer res.Body.Close()
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		message, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
-		var payload struct {
-			Errors []string `json:"errors"`
-		}
-		_ = json.Unmarshal(message, &payload)
-		details := res.Status
-		if len(payload.Errors) > 0 {
-			details = strings.Join(payload.Errors, "; ")
-		}
-		switch res.StatusCode {
-		case http.StatusUnauthorized:
-			return fmt.Errorf("Vault authentication failed: log in again or provide a valid token (%s)", details)
-		case http.StatusForbidden:
-			return fmt.Errorf("Vault permission denied: request access for this mount and path (%s)", details)
-		case http.StatusNotFound:
-			return fmt.Errorf("Vault path not found: verify the mount and secret path (%s)", details)
-		default:
-			return fmt.Errorf("Vault request failed: %s", details)
-		}
+		return responseError(res)
 	}
 	if target != nil {
 		if err := json.NewDecoder(res.Body).Decode(target); err != nil {
@@ -296,4 +283,36 @@ func (c *Client) request(ctx context.Context, method, kind, name string, query m
 		}
 	}
 	return nil
+}
+
+func responseError(res *http.Response) error {
+	message, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+	var payload struct {
+		Errors []string `json:"errors"`
+	}
+	_ = json.Unmarshal(message, &payload)
+	details := res.Status
+	if len(payload.Errors) > 0 {
+		details = strings.Join(payload.Errors, "; ")
+	}
+	if res.StatusCode == http.StatusUnauthorized || containsError(payload.Errors, "invalid token") || containsError(payload.Errors, "missing client token") {
+		return ErrNotLoggedIn
+	}
+	switch res.StatusCode {
+	case http.StatusForbidden:
+		return fmt.Errorf("Vault permission denied: request access for this mount and path (%s)", details)
+	case http.StatusNotFound:
+		return fmt.Errorf("Vault path not found: verify the mount and secret path (%s)", details)
+	default:
+		return fmt.Errorf("Vault request failed: %s", details)
+	}
+}
+
+func containsError(messages []string, target string) bool {
+	for _, message := range messages {
+		if strings.Contains(strings.ToLower(message), target) {
+			return true
+		}
+	}
+	return false
 }
