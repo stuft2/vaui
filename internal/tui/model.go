@@ -56,8 +56,9 @@ const (
 )
 
 type listMsg struct {
-	keys []string
-	err  error
+	prefix string
+	keys   []string
+	err    error
 }
 type readMsg struct {
 	name    string
@@ -186,6 +187,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err
 		if msg.err == nil {
+			m.prefix = msg.prefix
 			m.keys = msg.keys
 			m.visit(m.prefix)
 			visible := m.visibleKeys()
@@ -289,11 +291,10 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.ensureCursorVisible()
 		case "backspace", "h":
 			if m.prefix != "" {
-				m.prefix = parent(m.prefix)
 				m.clearFilter()
 				m.cursor = 0
 				m.loading = true
-				return m, m.loadList()
+				return m, m.loadListAt(parent(m.prefix))
 			}
 		case "enter", "l", "v":
 			if len(visible) == 0 {
@@ -301,11 +302,10 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			item := visible[m.cursor]
 			if strings.HasSuffix(item, "/") {
-				m.prefix += item
 				m.clearFilter()
 				m.cursor = 0
 				m.loading = true
-				return m, m.loadList()
+				return m, m.loadListAt(m.prefix + item)
 			}
 			m.loading = true
 			return m, m.loadSecret(m.prefix+item, 0)
@@ -577,11 +577,10 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.String() == "enter" {
 			m.pathInput.Blur()
-			m.prefix = normalizePath(m.pathInput.Value())
 			m.clearFilter()
 			m.loading = true
 			m.mode = browse
-			return m, m.loadList()
+			return m, m.loadListAt(normalizePath(m.pathInput.Value()))
 		}
 		var cmd tea.Cmd
 		m.pathInput, cmd = m.pathInput.Update(key)
@@ -596,19 +595,19 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("VAUI — Vault secrets"))
+	b.WriteString(m.singleLine(titleStyle, "VAUI — Vault secrets"))
 	b.WriteString("\n")
 	namespace := m.secrets.Namespace()
 	if namespace == "" {
 		namespace = "(root)"
 	}
-	b.WriteString(dimStyle.Render(fmt.Sprintf("Vault: %s • Namespace: %s • Mount: %s", m.secrets.Address(), namespace, m.secrets.Mount())) + "\n")
+	b.WriteString(m.singleLine(dimStyle, fmt.Sprintf("Vault: %s • Namespace: %s • Mount: %s", m.secrets.Address(), namespace, m.secrets.Mount())) + "\n")
 	if m.loading {
 		b.WriteString(dimStyle.Render("Working…"))
 		b.WriteString("\n")
 	}
 	if m.err != nil {
-		b.WriteString(errorStyle.Render(m.err.Error()))
+		b.WriteString(m.errorView())
 		b.WriteString("\n")
 	}
 	if m.status != "" {
@@ -617,7 +616,7 @@ func (m Model) View() string {
 	}
 	switch m.mode {
 	case browse, filtering:
-		b.WriteString("Path: " + breadcrumb(m.prefix) + "\n\n")
+		b.WriteString(m.singleLine(lipgloss.NewStyle(), "Path: "+breadcrumb(m.prefix)) + "\n\n")
 		if m.mode == filtering {
 			b.WriteString("Filter: " + m.filter.View() + "\n\n")
 		} else if m.filter.Value() != "" {
@@ -641,13 +640,13 @@ func (m Model) View() string {
 				marker = "> "
 				style = selectedStyle
 			}
-			b.WriteString(style.Render(marker + key))
+			b.WriteString(m.singleLine(style, marker+key))
 			b.WriteString("\n")
 		}
 		if m.mode == filtering {
-			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • type to filter • enter apply • esc clear", m.position(len(visible)))))
+			b.WriteString("\n" + m.singleLine(dimStyle, fmt.Sprintf("%s • type to filter • enter apply • esc clear", m.position(len(visible)))))
 		} else {
-			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • ↑/↓ navigate • enter open • g go to • p recent • m mounts • backspace parent • a add • q quit", m.position(len(visible)))))
+			b.WriteString("\n" + m.singleLine(dimStyle, fmt.Sprintf("%s • ↑/↓ navigate • enter open • g go to • p recent • m mounts • backspace parent • a add • q quit", m.position(len(visible)))))
 		}
 	case view:
 		b.WriteString("\nSecret: " + m.selected)
@@ -789,8 +788,13 @@ func (m Model) helpText(current mode) string {
 }
 
 func (m Model) loadList() tea.Cmd {
-	prefix := m.prefix
-	return func() tea.Msg { keys, err := m.secrets.List(context.Background(), prefix); return listMsg{keys, err} }
+	return m.loadListAt(m.prefix)
+}
+func (m Model) loadListAt(prefix string) tea.Cmd {
+	return func() tea.Msg {
+		keys, err := m.secrets.List(context.Background(), prefix)
+		return listMsg{prefix: prefix, keys: keys, err: err}
+	}
 }
 func (m Model) loadSecret(name string, version int) tea.Cmd {
 	return func() tea.Msg {
@@ -1042,7 +1046,7 @@ func (m Model) listHeight() int {
 		fixedLines++
 	}
 	if m.err != nil {
-		fixedLines++
+		fixedLines += lipgloss.Height(m.errorView())
 	}
 	if m.status != "" {
 		fixedLines++
@@ -1051,6 +1055,19 @@ func (m Model) listHeight() int {
 		fixedLines += 2
 	}
 	return max(1, m.height-fixedLines)
+}
+func (m Model) errorView() string {
+	style := errorStyle
+	if m.width > 0 {
+		style = style.Width(m.width)
+	}
+	return style.Render(m.err.Error())
+}
+func (m Model) singleLine(style lipgloss.Style, value string) string {
+	if m.width > 0 {
+		style = style.MaxWidth(m.width)
+	}
+	return style.Render(value)
 }
 func (m Model) visibleRange(length int) (int, int) {
 	if length == 0 {
@@ -1132,20 +1149,20 @@ func (m Model) handlePicker(key tea.KeyMsg, options []string, mounts bool) (tea.
 		}
 	case "enter":
 		if len(options) > 0 {
+			target := options[m.pickerCursor]
 			if mounts {
-				if err := m.secrets.SelectMount(options[m.pickerCursor]); err != nil {
+				if err := m.secrets.SelectMount(target); err != nil {
 					m.err = err
 					return m, nil
 				}
 				m.prefix = ""
 				m.recent = nil
-			} else {
-				m.prefix = options[m.pickerCursor]
+				target = ""
 			}
 			m.clearFilter()
 			m.mode = browse
 			m.loading = true
-			return m, m.loadList()
+			return m, m.loadListAt(target)
 		}
 	}
 	return m, nil
