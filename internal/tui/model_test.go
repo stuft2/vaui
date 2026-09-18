@@ -48,6 +48,8 @@ func (f *fakeSecretStore) Mount() string {
 	return f.mount
 }
 func (f *fakeSecretStore) SelectMount(value string) error { f.mount = value; return nil }
+func (f *fakeSecretStore) Address() string                { return "https://vault.example.edu" }
+func (f *fakeSecretStore) Namespace() string              { return "team" }
 
 func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, error) {
 	f.listedPrefix = prefix
@@ -333,6 +335,37 @@ func TestMultipleMountsRequireSelectionAndResetPathState(t *testing.T) {
 	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
 	if store.mount != "shared" || model.prefix != "" || len(model.recent) != 0 || cmd == nil {
 		t.Fatalf("mount switch = mount %q prefix %q recent %#v", store.mount, model.prefix, model.recent)
+	}
+}
+
+func TestContextualHelpPreservesModeAndState(t *testing.T) {
+	tests := []struct {
+		name string
+		mode mode
+		want string
+	}{
+		{"browse", browse, "go to path"}, {"secret", view, "reveal"}, {"editor", editFields, "raw JSON"}, {"history", history, "undelete"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := New(&fakeSecretStore{})
+			model.mode, model.prefix, model.selected = tt.mode, "apps/", "apps/token"
+			model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+			if model.mode != help || !strings.Contains(model.View(), tt.want) {
+				t.Fatalf("help for %v:\n%s", tt.mode, model.View())
+			}
+			model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+			if model.mode != tt.mode || model.prefix != "apps/" || model.selected != "apps/token" {
+				t.Fatalf("dismiss changed state: %#v", model)
+			}
+		})
+	}
+}
+
+func TestConnectionContextDoesNotShowToken(t *testing.T) {
+	view := New(&fakeSecretStore{}).View()
+	if !strings.Contains(view, "Vault: https://vault.example.edu • Namespace: team • Mount: secret") || strings.Contains(view, "token") {
+		t.Fatalf("unsafe or missing context:\n%s", view)
 	}
 }
 

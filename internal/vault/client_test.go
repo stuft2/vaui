@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -164,8 +165,50 @@ func TestVaultErrorMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := client.Read(context.Background(), "x", 0); err == nil || err.Error() != "Vault: permission denied" {
+	if _, err := client.Read(context.Background(), "x", 0); err == nil || !strings.Contains(err.Error(), "Vault permission denied") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestActionableVaultErrors(t *testing.T) {
+	tests := []struct {
+		status int
+		want   string
+	}{{http.StatusUnauthorized, "authentication failed"}, {http.StatusForbidden, "permission denied"}, {http.StatusNotFound, "path not found"}}
+	for _, tt := range tests {
+		t.Run(tt.want, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				json.NewEncoder(w).Encode(map[string]any{"errors": []string{"raw detail"}})
+			}))
+			defer server.Close()
+			client, _ := New(server.URL, "sensitive-token", "", []string{"secret"}, false)
+			_, err := client.Read(context.Background(), "x", 0)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "raw detail") || strings.Contains(err.Error(), "sensitive-token") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestConnectivityErrorAndSafeContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	address := server.URL
+	server.Close()
+	credentialAddress := strings.Replace(address, "http://", "http://user:password@", 1)
+	client, err := New(credentialAddress, "token", "team", []string{"secret"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.List(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "connectivity failed") || strings.Contains(err.Error(), "password") {
+		t.Fatalf("error = %v", err)
+	}
+	withUserInfo, err := New("https://user:password@vault.example.edu/base?credential=x", "token", "team", []string{"secret"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := withUserInfo.Address(); got != "https://vault.example.edu/base" {
+		t.Fatalf("safe address = %q", got)
 	}
 }
 
