@@ -20,7 +20,7 @@ vault login
 vaui
 ```
 
-VAUI uses `VAULT_TOKEN` when it is set; otherwise it reads the token saved by `vault login` in `~/.vault-token`. You can also pass `-token` explicitly. The default mount is `secret`. Override it with `-mount`, or set `VAULT_KV2_MOUNTS`, which is also used by VSH. When the variable contains multiple comma-separated mounts, VAUI uses the first one. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
+VAUI uses `VAULT_TOKEN` when it is set; otherwise it reads the token saved by `vault login` in `~/.vault-token`. You can also pass `-token` explicitly. The default mount is `secret`. Override it with `-mount` or set `VAULT_KV2_MOUNTS`. When the variable contains multiple comma-separated mounts, VAUI uses the first one. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
 
 Inside the UI, use the arrow keys to navigate, Enter to open a path or secret, `/` to filter entries in the current path, `a` to add, `e` to edit, `d` to delete, and `q` to quit. Filtering is case-insensitive; press Enter to apply it or Escape to clear it. Secret values are masked by default; select a field and press `r` to reveal or hide it, or `c` to copy its value.
 
