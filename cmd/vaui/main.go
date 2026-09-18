@@ -11,7 +11,7 @@ import (
 func main() {
 	addr := flag.String("addr", env("VAULT_ADDR", "http://127.0.0.1:8200"), "Vault server address")
 	token := flag.String("token", os.Getenv("VAULT_TOKEN"), "Vault token (defaults to VAULT_TOKEN or the Vault CLI login token)")
-	mount := flag.String("mount", env("VAUI_MOUNT", "secret"), "KV v2 mount")
+	mount := flag.String("mount", defaultMount(), "KV v2 mount")
 	namespace := flag.String("namespace", os.Getenv("VAULT_NAMESPACE"), "Vault Enterprise namespace")
 	insecure := flag.Bool("insecure", false, "skip TLS certificate verification")
 	flag.Parse()
@@ -73,4 +73,9 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func defaultMount() string {
+	mounts := strings.Split(env("VAULT_KV2_MOUNTS", "secret"), ",")
+	return strings.TrimSpace(mounts[0])
 }

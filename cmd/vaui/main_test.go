@@ -61,3 +61,24 @@ func TestVaultLoginTokenReadError(t *testing.T) {
 		t.Fatal("vaultLoginToken() error = nil, want read error")
 	}
 }
+
+func TestDefaultMount(t *testing.T) {
+	tests := []struct {
+		name   string
+		mounts string
+		want   string
+	}{
+		{name: "default", want: "secret"},
+		{name: "single mount", mounts: "kvv2", want: "kvv2"},
+		{name: "first of multiple mounts", mounts: " kvv2, legacy ", want: "kvv2"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("VAULT_KV2_MOUNTS", tt.mounts)
+			if got := defaultMount(); got != tt.want {
+				t.Fatalf("defaultMount() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
