@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,6 +46,10 @@ type actionMsg struct {
 	text string
 	err  error
 }
+type copyMsg struct {
+	key string
+	err error
+}
 
 type Model struct {
 	secrets       SecretStore
@@ -54,6 +60,8 @@ type Model struct {
 	listOffset    int
 	selected      string
 	data          map[string]any
+	fieldCursor   int
+	revealed      map[string]bool
 	status        string
 	err           error
 	loading       bool
@@ -61,6 +69,7 @@ type Model struct {
 	editor        textarea.Model
 	name          textinput.Model
 	filter        textinput.Model
+	copyValue     func(string) error
 }
 
 var (
@@ -83,7 +92,10 @@ func New(secrets SecretStore) Model {
 	filter.Placeholder = "filter current path"
 	filter.CharLimit = 256
 	filter.Width = 60
-	return Model{secrets: secrets, loading: true, editor: ed, name: name, filter: filter}
+	return Model{
+		secrets: secrets, loading: true, editor: ed, name: name, filter: filter,
+		revealed: make(map[string]bool), copyValue: clipboard.WriteAll,
+	}
 }
 
 func (m Model) Init() tea.Cmd { return m.loadList() }
@@ -111,6 +123,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		if msg.err == nil {
 			m.selected, m.data, m.mode = msg.name, msg.data, view
+			m.fieldCursor = 0
+			m.revealed = make(map[string]bool)
 		}
 	case actionMsg:
 		m.loading = false
@@ -119,6 +133,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = msg.text
 			m.mode = browse
 			return m, m.loadList()
+		}
+	case copyMsg:
+		m.err = msg.err
+		if msg.err == nil {
+			m.status = "Copied value for " + msg.key
 		}
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -200,9 +219,27 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ensureCursorVisible()
 		return m, cmd
 	case view:
+		fields := m.secretKeys()
 		switch key.String() {
 		case "esc", "q":
 			m.mode = browse
+		case "up", "k":
+			if m.fieldCursor > 0 {
+				m.fieldCursor--
+			}
+		case "down", "j":
+			if m.fieldCursor+1 < len(fields) {
+				m.fieldCursor++
+			}
+		case "r":
+			if len(fields) > 0 {
+				field := fields[m.fieldCursor]
+				m.revealed[field] = !m.revealed[field]
+			}
+		case "c":
+			if len(fields) > 0 {
+				return m, m.copySelectedValue(fields[m.fieldCursor])
+			}
 		case "e":
 			raw, _ := json.MarshalIndent(m.data, "", "  ")
 			m.editor.SetValue(string(raw))
@@ -321,9 +358,26 @@ func (m Model) View() string {
 		}
 	case view:
 		b.WriteString("\nSecret: " + m.selected + "\n\n")
-		raw, _ := json.MarshalIndent(m.data, "", "  ")
-		b.Write(raw)
-		b.WriteString("\n\n" + dimStyle.Render("e edit • d delete • esc back"))
+		fields := m.secretKeys()
+		if len(fields) == 0 {
+			b.WriteString(dimStyle.Render("No fields."))
+			b.WriteString("\n")
+		}
+		for i, field := range fields {
+			marker := "  "
+			style := lipgloss.NewStyle()
+			if i == m.fieldCursor {
+				marker = "> "
+				style = selectedStyle
+			}
+			value := "••••••••"
+			if m.revealed[field] {
+				value = displayValue(m.data[field])
+			}
+			b.WriteString(style.Render(fmt.Sprintf("%s%s: %s", marker, field, value)))
+			b.WriteString("\n")
+		}
+		b.WriteString("\n" + dimStyle.Render("↑/↓ select • r reveal/hide • c copy • e edit • d delete • esc back"))
 	case edit:
 		b.WriteString("\nEditing: " + m.selected + "\n")
 		b.WriteString(m.editor.View())
@@ -359,6 +413,44 @@ func (m Model) deleteSecret(name string) tea.Cmd {
 		err := m.secrets.Delete(context.Background(), name)
 		return actionMsg{"Deleted " + name, err}
 	}
+}
+func (m Model) copySelectedValue(key string) tea.Cmd {
+	value, err := clipboardValue(m.data[key])
+	if err != nil {
+		return func() tea.Msg { return copyMsg{key: key, err: fmt.Errorf("copy value for %s: %w", key, err)} }
+	}
+	copyValue := m.copyValue
+	return func() tea.Msg {
+		if err := copyValue(value); err != nil {
+			return copyMsg{key: key, err: fmt.Errorf("copy value for %s: %w", key, err)}
+		}
+		return copyMsg{key: key}
+	}
+}
+func (m Model) secretKeys() []string {
+	keys := make([]string, 0, len(m.data))
+	for key := range m.data {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+func displayValue(value any) string {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "<unavailable>"
+	}
+	return string(raw)
+}
+func clipboardValue(value any) (string, error) {
+	if value, ok := value.(string); ok {
+		return value, nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("encode value: %w", err)
+	}
+	return string(raw), nil
 }
 func (m Model) visibleKeys() []string {
 	query := strings.ToLower(strings.TrimSpace(m.filter.Value()))
