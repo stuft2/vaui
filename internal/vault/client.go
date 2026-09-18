@@ -37,13 +37,62 @@ func New(address, token, namespace string, mounts []string, insecure bool) (*Cli
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure} //nolint:gosec -- explicit CLI option
-	if len(mounts) == 0 {
-		return nil, fmt.Errorf("at least one KV v2 mount is required")
-	}
-	return &Client{
-		base: base, token: token, namespace: namespace, mounts: append([]string(nil), mounts...), mount: mounts[0],
+	client := &Client{
+		base: base, token: token, namespace: namespace,
 		http: &http.Client{Transport: transport, Timeout: 15 * time.Second},
-	}, nil
+	}
+	if len(mounts) == 0 {
+		mounts, err = client.discoverKVv2Mounts(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("detect KV v2 mounts: %w; configure -mount or VAULT_KV2_MOUNTS", err)
+		}
+		if len(mounts) == 0 {
+			return nil, fmt.Errorf("no accessible KV v2 mounts detected; configure -mount or VAULT_KV2_MOUNTS")
+		}
+	}
+	client.mounts = append([]string(nil), mounts...)
+	client.mount = mounts[0]
+	return client, nil
+}
+
+func (c *Client) discoverKVv2Mounts(ctx context.Context) ([]string, error) {
+	u := *c.base
+	u.Path = path.Join(c.base.Path, "v1", "sys", "internal", "ui", "mounts")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Vault-Token", c.token)
+	if c.namespace != "" {
+		req.Header.Set("X-Vault-Namespace", c.namespace)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("Vault returned %s", res.Status)
+	}
+	var response struct {
+		Data struct {
+			Secret map[string]struct {
+				Type    string            `json:"type"`
+				Options map[string]string `json:"options"`
+			} `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("decode Vault mount response: %w", err)
+	}
+	var mounts []string
+	for mount, details := range response.Data.Secret {
+		if details.Type == "kv" && details.Options["version"] == "2" {
+			mounts = append(mounts, strings.Trim(mount, "/"))
+		}
+	}
+	sort.Strings(mounts)
+	return mounts, nil
 }
 
 func (c *Client) Mounts() []string {

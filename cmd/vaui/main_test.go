@@ -69,7 +69,7 @@ func TestDefaultMounts(t *testing.T) {
 		mounts string
 		want   []string
 	}{
-		{name: "default", want: []string{"secret"}},
+		{name: "default"},
 		{name: "single mount", mounts: "kvv2", want: []string{"kvv2"}},
 		{name: "multiple normalized mounts", mounts: " /kvv2/, legacy,kvv2 ", want: []string{"kvv2", "legacy"}},
 	}
