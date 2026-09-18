@@ -6,18 +6,25 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stuft2/vaui/internal/secret"
 )
 
 type fakeSecretStore struct {
-	listedPrefix string
-	listKeys     []string
-	readName     string
-	readData     map[string]any
-	writtenName  string
-	writtenData  map[string]any
-	deletedName  string
+	listedPrefix    string
+	listKeys        []string
+	readName        string
+	readVersion     int
+	readValue       secret.Value
+	metadata        secret.Metadata
+	metadataErr     error
+	restoredName    string
+	restoredVersion int
+	writtenName     string
+	writtenData     map[string]any
+	deletedName     string
 }
 
 func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, error) {
@@ -25,9 +32,18 @@ func (f *fakeSecretStore) List(_ context.Context, prefix string) ([]string, erro
 	return f.listKeys, nil
 }
 
-func (f *fakeSecretStore) Read(_ context.Context, name string) (map[string]any, error) {
+func (f *fakeSecretStore) Read(_ context.Context, name string, version int) (secret.Value, error) {
 	f.readName = name
-	return f.readData, nil
+	f.readVersion = version
+	return f.readValue, nil
+}
+
+func (f *fakeSecretStore) Metadata(_ context.Context, _ string) (secret.Metadata, error) {
+	return f.metadata, f.metadataErr
+}
+func (f *fakeSecretStore) Restore(_ context.Context, name string, version int) error {
+	f.restoredName, f.restoredVersion = name, version
+	return nil
 }
 
 func (f *fakeSecretStore) Write(_ context.Context, name string, data map[string]any) error {
@@ -45,8 +61,8 @@ func TestSecretCommands(t *testing.T) {
 	t.Parallel()
 
 	store := &fakeSecretStore{
-		listKeys: []string{"apps/", "token"},
-		readData: map[string]any{"password": "secret"},
+		listKeys:  []string{"apps/", "token"},
+		readValue: secret.Value{Data: map[string]any{"password": "secret"}, Version: 3},
 	}
 	model := New(store)
 	model.prefix = "team/"
@@ -59,12 +75,12 @@ func TestSecretCommands(t *testing.T) {
 		t.Fatalf("loadList = (%q, %#v), want (%q, %#v)", store.listedPrefix, listResult.keys, "team/", store.listKeys)
 	}
 
-	readResult, ok := model.loadSecret("team/token")().(readMsg)
+	readResult, ok := model.loadSecret("team/token", 0)().(readMsg)
 	if !ok {
-		t.Fatalf("loadSecret result has type %T, want readMsg", model.loadSecret("team/token")())
+		t.Fatalf("loadSecret result has type %T, want readMsg", model.loadSecret("team/token", 0)())
 	}
-	if store.readName != "team/token" || !reflect.DeepEqual(readResult.data, store.readData) {
-		t.Fatalf("loadSecret = (%q, %#v), want (%q, %#v)", store.readName, readResult.data, "team/token", store.readData)
+	if store.readName != "team/token" || !reflect.DeepEqual(readResult.value, store.readValue) {
+		t.Fatalf("loadSecret = (%q, %#v), want (%q, %#v)", store.readName, readResult.value, "team/token", store.readValue)
 	}
 
 	written := map[string]any{"password": "changed"}
@@ -82,6 +98,79 @@ func TestSecretCommands(t *testing.T) {
 	}
 	if store.deletedName != "team/token" || deleteResult.text != "Deleted team/token" {
 		t.Fatalf("deleteSecret = (%q, %q)", store.deletedName, deleteResult.text)
+	}
+}
+
+func TestVersionHistoryInspectAndRestore(t *testing.T) {
+	created := time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC)
+	store := &fakeSecretStore{metadata: secret.Metadata{CurrentVersion: 3, Versions: []secret.Version{{Version: 3, CreatedTime: created}, {Version: 2, CreatedTime: created}}}}
+	model := New(store)
+	model.selected = "team/token"
+	model.data = map[string]any{"password": "current"}
+	model.value = secret.Value{Data: model.data, Version: 3, CreatedTime: created}
+	model.metadata = store.metadata
+	model.mode = view
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	if model.mode != history || !strings.Contains(model.View(), "v3") || !strings.Contains(model.View(), "current") {
+		t.Fatalf("history view missing metadata:\n%s", model.View())
+	}
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("inspect returned no command")
+	}
+	if _, ok := cmd().(readMsg); !ok {
+		t.Fatal("inspect command did not return readMsg")
+	}
+	if store.readVersion != 2 {
+		t.Fatalf("read version = %d, want 2", store.readVersion)
+	}
+
+	model.mode = history
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if model.mode != confirmRestore {
+		t.Fatalf("mode = %v, want confirmRestore", model.mode)
+	}
+	model, cmd = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("restore returned no command")
+	}
+	_ = cmd()
+	if store.restoredName != "team/token" || store.restoredVersion != 2 {
+		t.Fatalf("restore = (%q, %d)", store.restoredName, store.restoredVersion)
+	}
+}
+
+func TestMetadataFailureDoesNotBreakSecretView(t *testing.T) {
+	store := &fakeSecretStore{metadataErr: fmt.Errorf("Vault: permission denied")}
+	model := New(store)
+	value := secret.Value{Data: map[string]any{"password": "secret"}, Version: 4}
+	updated, cmd := model.Update(readMsg{name: "team/token", value: value})
+	model = updated.(Model)
+	if model.mode != view || cmd == nil {
+		t.Fatalf("read result = mode %v, command %v", model.mode, cmd)
+	}
+	updated, _ = model.Update(cmd())
+	model = updated.(Model)
+	if model.mode != view || model.err != nil || model.historyErr == nil {
+		t.Fatalf("metadata error broke view: mode=%v err=%v historyErr=%v", model.mode, model.err, model.historyErr)
+	}
+	model.mode = history
+	if !strings.Contains(model.View(), "Version history unavailable: Vault: permission denied") {
+		t.Fatalf("missing permission explanation:\n%s", model.View())
+	}
+}
+
+func TestPriorVersionRequiresRestoreBeforeEditing(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.mode = view
+	model.value = secret.Value{Data: map[string]any{"password": "old"}, Version: 2}
+	model.data = model.value.Data
+	model.metadata.CurrentVersion = 3
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	if model.mode != view || !strings.Contains(model.status, "restore") {
+		t.Fatalf("prior version edit = mode %v, status %q", model.mode, model.status)
 	}
 }
 

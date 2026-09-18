@@ -11,8 +11,11 @@ import (
 	"net/url"
 	"path"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/stuft2/vaui/internal/secret"
 )
 
 type Client struct {
@@ -55,20 +58,81 @@ func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
 	return response.Data.Keys, nil
 }
 
-func (c *Client) Read(ctx context.Context, name string) (map[string]any, error) {
+func (c *Client) Read(ctx context.Context, name string, version int) (secret.Value, error) {
 	var response struct {
 		Data struct {
-			Data map[string]any `json:"data"`
+			Data     map[string]any `json:"data"`
+			Metadata versionJSON    `json:"metadata"`
 		} `json:"data"`
 	}
-	if err := c.request(ctx, http.MethodGet, "data", name, nil, nil, &response); err != nil {
-		return nil, err
+	var query map[string]string
+	if version > 0 {
+		query = map[string]string{"version": strconv.Itoa(version)}
 	}
-	return response.Data.Data, nil
+	if err := c.request(ctx, http.MethodGet, "data", name, query, nil, &response); err != nil {
+		return secret.Value{}, err
+	}
+	return response.Data.Metadata.value(response.Data.Data), nil
+}
+
+func (c *Client) Metadata(ctx context.Context, name string) (secret.Metadata, error) {
+	var response struct {
+		Data struct {
+			CurrentVersion int                    `json:"current_version"`
+			Versions       map[string]versionJSON `json:"versions"`
+		} `json:"data"`
+	}
+	if err := c.request(ctx, http.MethodGet, "metadata", name, nil, nil, &response); err != nil {
+		return secret.Metadata{}, err
+	}
+	metadata := secret.Metadata{CurrentVersion: response.Data.CurrentVersion}
+	for rawVersion, raw := range response.Data.Versions {
+		version, err := strconv.Atoi(rawVersion)
+		if err != nil {
+			return secret.Metadata{}, fmt.Errorf("decode Vault response: invalid version %q", rawVersion)
+		}
+		metadata.Versions = append(metadata.Versions, raw.version(version))
+	}
+	sort.Slice(metadata.Versions, func(i, j int) bool { return metadata.Versions[i].Version > metadata.Versions[j].Version })
+	return metadata, nil
+}
+
+func (c *Client) Restore(ctx context.Context, name string, version int) error {
+	value, err := c.Read(ctx, name, version)
+	if err != nil {
+		return err
+	}
+	return c.Write(ctx, name, value.Data)
 }
 
 func (c *Client) Write(ctx context.Context, name string, data map[string]any) error {
 	return c.request(ctx, http.MethodPost, "data", name, nil, map[string]any{"data": data}, nil)
+}
+
+type versionJSON struct {
+	CreatedTime  time.Time `json:"created_time"`
+	DeletionTime string    `json:"deletion_time"`
+	Destroyed    bool      `json:"destroyed"`
+	Version      int       `json:"version"`
+}
+
+func (v versionJSON) value(data map[string]any) secret.Value {
+	return secret.Value{Data: data, Version: v.Version, CreatedTime: v.CreatedTime, DeletionTime: optionalTime(v.DeletionTime), Destroyed: v.Destroyed}
+}
+
+func (v versionJSON) version(number int) secret.Version {
+	return secret.Version{Version: number, CreatedTime: v.CreatedTime, DeletionTime: optionalTime(v.DeletionTime), Destroyed: v.Destroyed}
+}
+
+func optionalTime(value string) *time.Time {
+	if value == "" {
+		return nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func (c *Client) Delete(ctx context.Context, name string) error {
