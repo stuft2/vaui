@@ -1,0 +1,63 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestResolveTokenPrefersExplicitToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".vault-token"), []byte("login-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveToken("explicit-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "explicit-token" {
+		t.Fatalf("resolveToken() = %q, want %q", got, "explicit-token")
+	}
+}
+
+func TestVaultLoginToken(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.WriteFile(filepath.Join(home, ".vault-token"), []byte(" logged-in-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := vaultLoginToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "logged-in-token" {
+		t.Fatalf("vaultLoginToken() = %q, want %q", got, "logged-in-token")
+	}
+}
+
+func TestVaultLoginTokenMissing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	got, err := vaultLoginToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "" {
+		t.Fatalf("vaultLoginToken() = %q, want empty token", got)
+	}
+}
+
+func TestVaultLoginTokenReadError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.Mkdir(filepath.Join(home, ".vault-token"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := vaultLoginToken(); err == nil {
+		t.Fatal("vaultLoginToken() error = nil, want read error")
+	}
+}
