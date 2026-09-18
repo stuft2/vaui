@@ -3,7 +3,10 @@ package tui
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 type fakeSecretStore struct {
@@ -88,4 +91,68 @@ func TestParent(t *testing.T) {
 			t.Errorf("parent(%q) = %q, want %q", input, got, want)
 		}
 	}
+}
+
+func TestFilterPaths(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.keys = []string{"apps/", "argocd/", "token"}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("APP")})
+
+	if model.mode != filtering {
+		t.Fatalf("mode = %v, want filtering", model.mode)
+	}
+	view := model.View()
+	if !strings.Contains(view, "apps/") || strings.Contains(view, "argocd/") || strings.Contains(view, "token") {
+		t.Fatalf("filtered view contains unexpected paths:\n%s", view)
+	}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+	if model.mode != browse || model.filter.Value() != "APP" {
+		t.Fatalf("applied filter = (%v, %q), want (browse, %q)", model.mode, model.filter.Value(), "APP")
+	}
+}
+
+func TestFilterNavigationUsesVisiblePaths(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.keys = []string{"apps/", "argocd/", "token"}
+	model.filter.SetValue("a")
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyDown})
+	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEnter})
+
+	if model.prefix != "argocd/" {
+		t.Fatalf("prefix = %q, want %q", model.prefix, "argocd/")
+	}
+	if model.filter.Value() != "" {
+		t.Fatalf("filter = %q, want cleared after navigation", model.filter.Value())
+	}
+	if cmd == nil {
+		t.Fatal("opening a filtered directory returned no load command")
+	}
+}
+
+func TestEscapeClearsFilter(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.keys = []string{"apps/", "token"}
+	model.mode = filtering
+	model.filter.SetValue("apps")
+	model.filter.Focus()
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyEsc})
+
+	if model.mode != browse || model.filter.Value() != "" || len(model.visibleKeys()) != 2 {
+		t.Fatalf("cleared filter = (%v, %q, %v)", model.mode, model.filter.Value(), model.visibleKeys())
+	}
+}
+
+func updateWithKey(t *testing.T, model Model, key tea.KeyMsg) (Model, tea.Cmd) {
+	t.Helper()
+	updated, cmd := model.handleKey(key)
+	result, ok := updated.(Model)
+	if !ok {
+		t.Fatalf("updated model has type %T, want Model", updated)
+	}
+	return result, cmd
 }
