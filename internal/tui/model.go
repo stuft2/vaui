@@ -7,18 +7,22 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/stuft2/vaui/internal/secret"
 )
 
 // SecretStore describes the Vault operations the terminal UI consumes.
 type SecretStore interface {
 	List(context.Context, string) ([]string, error)
-	Read(context.Context, string) (map[string]any, error)
+	Read(context.Context, string, int) (secret.Value, error)
+	Metadata(context.Context, string) (secret.Metadata, error)
+	Restore(context.Context, string, int) error
 	Write(context.Context, string, map[string]any) error
 	Delete(context.Context, string) error
 }
@@ -34,6 +38,8 @@ const (
 	edit
 	addName
 	confirmDelete
+	history
+	confirmRestore
 )
 
 type listMsg struct {
@@ -41,9 +47,18 @@ type listMsg struct {
 	err  error
 }
 type readMsg struct {
-	name string
-	data map[string]any
-	err  error
+	name    string
+	value   secret.Value
+	version int
+	err     error
+}
+type metadataMsg struct {
+	metadata secret.Metadata
+	err      error
+}
+type restoreMsg struct {
+	version int
+	err     error
 }
 type actionMsg struct {
 	text string
@@ -63,6 +78,10 @@ type Model struct {
 	listOffset     int
 	selected       string
 	data           map[string]any
+	value          secret.Value
+	metadata       secret.Metadata
+	historyErr     error
+	historyCursor  int
 	draft          map[string]any
 	fieldCursor    int
 	revealed       map[string]bool
@@ -142,9 +161,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.err = msg.err
 		if msg.err == nil {
-			m.selected, m.data, m.mode = msg.name, msg.data, view
+			m.selected, m.value, m.data, m.mode = msg.name, msg.value, msg.value.Data, view
+			m.historyErr = nil
+			if msg.version == 0 {
+				m.metadata = secret.Metadata{}
+			}
 			m.fieldCursor = 0
 			m.revealed = make(map[string]bool)
+			return m, m.loadMetadata(msg.name)
+		}
+	case metadataMsg:
+		m.loading = false
+		m.historyErr = msg.err
+		if msg.err == nil {
+			m.metadata = msg.metadata
+			m.historyCursor = 0
+		}
+	case restoreMsg:
+		m.loading = false
+		m.err = msg.err
+		if msg.err == nil {
+			m.status = fmt.Sprintf("Restored version %d as a new version", msg.version)
+			m.loading = true
+			return m, m.loadSecret(m.selected, 0)
 		}
 	case actionMsg:
 		m.loading = false
@@ -213,7 +252,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.loadList()
 			}
 			m.loading = true
-			return m, m.loadSecret(m.prefix + item)
+			return m, m.loadSecret(m.prefix+item, 0)
 		case "a":
 			m.mode = addName
 			m.name.SetValue(strings.TrimSuffix(m.prefix, "/"))
@@ -261,9 +300,17 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.copySelectedValue(fields[m.fieldCursor])
 			}
 		case "e":
-			m.startStructuredEdit()
+			if m.viewingPriorVersion() {
+				m.status = "Use history restore to make this version current before editing"
+			} else {
+				m.startStructuredEdit()
+			}
+		case "h":
+			m.mode = history
 		case "d":
-			m.mode = confirmDelete
+			if !m.viewingPriorVersion() {
+				m.mode = confirmDelete
+			}
 		}
 	case editFields:
 		fields := sortedKeys(m.draft)
@@ -382,6 +429,38 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "esc":
 			m.mode = view
 		}
+	case history:
+		switch key.String() {
+		case "esc", "q":
+			m.mode = view
+		case "up", "k":
+			if m.historyCursor > 0 {
+				m.historyCursor--
+			}
+		case "down", "j":
+			if m.historyCursor+1 < len(m.metadata.Versions) {
+				m.historyCursor++
+			}
+		case "enter":
+			if version, ok := m.selectedVersion(); ok && !version.Destroyed && version.DeletionTime == nil {
+				m.loading = true
+				return m, m.loadSecret(m.selected, version.Version)
+			}
+		case "r":
+			if version, ok := m.selectedVersion(); ok && !version.Destroyed && version.DeletionTime == nil {
+				m.mode = confirmRestore
+			}
+		}
+	case confirmRestore:
+		switch strings.ToLower(key.String()) {
+		case "y":
+			if version, ok := m.selectedVersion(); ok {
+				m.loading = true
+				return m, m.restoreSecret(m.selected, version.Version)
+			}
+		case "n", "esc":
+			m.mode = history
+		}
 	}
 	return m, nil
 }
@@ -441,7 +520,14 @@ func (m Model) View() string {
 			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • ↑/↓ navigate • enter open • / filter • backspace parent • a add • q quit", m.position(len(visible)))))
 		}
 	case view:
-		b.WriteString("\nSecret: " + m.selected + "\n\n")
+		b.WriteString("\nSecret: " + m.selected)
+		if m.value.Version > 0 {
+			b.WriteString(fmt.Sprintf(" • version %d", m.value.Version))
+		}
+		if !m.value.CreatedTime.IsZero() {
+			b.WriteString(" • created " + formatTime(m.value.CreatedTime))
+		}
+		b.WriteString("\n\n")
 		fields := m.secretKeys()
 		if len(fields) == 0 {
 			b.WriteString(dimStyle.Render("No fields."))
@@ -461,7 +547,11 @@ func (m Model) View() string {
 			b.WriteString(style.Render(fmt.Sprintf("%s%s: %s", marker, field, value)))
 			b.WriteString("\n")
 		}
-		b.WriteString("\n" + dimStyle.Render("↑/↓ select • r reveal/hide • c copy • e edit • d delete • esc back"))
+		help := "↑/↓ select • r reveal/hide • c copy • e edit • h history • d delete • esc back"
+		if m.viewingPriorVersion() {
+			help = "↑/↓ select • r reveal/hide • c copy • h history • esc back"
+		}
+		b.WriteString("\n" + dimStyle.Render(help))
 	case editFields:
 		b.WriteString("\nEditing fields: " + m.selected + "\n\n")
 		fields := sortedKeys(m.draft)
@@ -495,6 +585,32 @@ func (m Model) View() string {
 		b.WriteString("\n" + dimStyle.Render("enter continue • esc cancel"))
 	case confirmDelete:
 		b.WriteString("\nDelete all versions and metadata for " + selectedStyle.Render(m.selected) + "? (y/N)")
+	case history:
+		b.WriteString("\nVersion history: " + m.selected + "\n\n")
+		if m.historyErr != nil {
+			b.WriteString(errorStyle.Render("Version history unavailable: "+m.historyErr.Error()) + "\n")
+		} else {
+			for i, version := range m.metadata.Versions {
+				marker, label := "  ", fmt.Sprintf("v%d • %s", version.Version, formatTime(version.CreatedTime))
+				if version.Version == m.metadata.CurrentVersion {
+					label += " • current"
+				}
+				if version.Destroyed {
+					label += " • destroyed"
+				} else if version.DeletionTime != nil {
+					label += " • deleted"
+				}
+				style := lipgloss.NewStyle()
+				if i == m.historyCursor {
+					marker, style = "> ", selectedStyle
+				}
+				b.WriteString(style.Render(marker+label) + "\n")
+			}
+		}
+		b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter inspect • r restore • esc back"))
+	case confirmRestore:
+		version, _ := m.selectedVersion()
+		b.WriteString(fmt.Sprintf("\nRestore version %d of %s as a new current version? (y/N)", version.Version, selectedStyle.Render(m.selected)))
 	}
 	return b.String()
 }
@@ -503,11 +619,20 @@ func (m Model) loadList() tea.Cmd {
 	prefix := m.prefix
 	return func() tea.Msg { keys, err := m.secrets.List(context.Background(), prefix); return listMsg{keys, err} }
 }
-func (m Model) loadSecret(name string) tea.Cmd {
+func (m Model) loadSecret(name string, version int) tea.Cmd {
 	return func() tea.Msg {
-		data, err := m.secrets.Read(context.Background(), name)
-		return readMsg{name, data, err}
+		value, err := m.secrets.Read(context.Background(), name, version)
+		return readMsg{name: name, value: value, version: version, err: err}
 	}
+}
+func (m Model) loadMetadata(name string) tea.Cmd {
+	return func() tea.Msg {
+		value, err := m.secrets.Metadata(context.Background(), name)
+		return metadataMsg{value, err}
+	}
+}
+func (m Model) restoreSecret(name string, version int) tea.Cmd {
+	return func() tea.Msg { return restoreMsg{version, m.secrets.Restore(context.Background(), name, version)} }
 }
 func (m Model) writeSecret(name string, data map[string]any) tea.Cmd {
 	return func() tea.Msg {
@@ -515,6 +640,16 @@ func (m Model) writeSecret(name string, data map[string]any) tea.Cmd {
 		return actionMsg{"Saved " + name, err}
 	}
 }
+func (m Model) selectedVersion() (secret.Version, bool) {
+	if m.historyCursor < 0 || m.historyCursor >= len(m.metadata.Versions) {
+		return secret.Version{}, false
+	}
+	return m.metadata.Versions[m.historyCursor], true
+}
+func (m Model) viewingPriorVersion() bool {
+	return m.metadata.CurrentVersion > 0 && m.value.Version > 0 && m.value.Version != m.metadata.CurrentVersion
+}
+func formatTime(value time.Time) string { return value.Local().Format("2006-01-02 15:04 MST") }
 func (m Model) deleteSecret(name string) tea.Cmd {
 	return func() tea.Msg {
 		err := m.secrets.Delete(context.Background(), name)
