@@ -51,6 +51,7 @@ type Model struct {
 	prefix        string
 	keys          []string
 	cursor        int
+	listOffset    int
 	selected      string
 	data          map[string]any
 	status        string
@@ -93,6 +94,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.editor.SetWidth(max(30, min(100, msg.Width-4)))
 		m.editor.SetHeight(max(6, msg.Height-9))
+		m.ensureCursorVisible()
 	case listMsg:
 		m.loading = false
 		m.err = msg.err
@@ -102,6 +104,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.cursor >= len(visible) {
 				m.cursor = max(0, len(visible)-1)
 			}
+			m.ensureCursorVisible()
 		}
 	case readMsg:
 		m.loading = false
@@ -138,15 +141,18 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "/":
 			m.mode = filtering
 			m.filter.Focus()
+			m.ensureCursorVisible()
 			return m, textinput.Blink
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
+			m.ensureCursorVisible()
 		case "down", "j":
 			if m.cursor+1 < len(visible) {
 				m.cursor++
 			}
+			m.ensureCursorVisible()
 		case "backspace", "h":
 			if m.prefix != "" {
 				m.prefix = parent(m.prefix)
@@ -185,11 +191,13 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.filter.Blur()
 			m.mode = browse
+			m.ensureCursorVisible()
 			return m, nil
 		}
 		var cmd tea.Cmd
 		m.filter, cmd = m.filter.Update(key)
 		m.cursor = 0
+		m.ensureCursorVisible()
 		return m, cmd
 	case view:
 		switch key.String() {
@@ -294,7 +302,9 @@ func (m Model) View() string {
 			b.WriteString(dimStyle.Render(emptyMessage))
 			b.WriteString("\n")
 		}
-		for i, key := range visible {
+		start, end := m.visibleRange(len(visible))
+		for i := start; i < end; i++ {
+			key := visible[i]
 			marker := "  "
 			style := lipgloss.NewStyle()
 			if i == m.cursor {
@@ -305,9 +315,9 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 		if m.mode == filtering {
-			b.WriteString("\n" + dimStyle.Render("type to filter • enter apply • esc clear"))
+			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • type to filter • enter apply • esc clear", m.position(len(visible)))))
 		} else {
-			b.WriteString("\n" + dimStyle.Render("↑/↓ navigate • enter open • / filter • backspace parent • a add • q quit"))
+			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • ↑/↓ navigate • enter open • / filter • backspace parent • a add • q quit", m.position(len(visible)))))
 		}
 	case view:
 		b.WriteString("\nSecret: " + m.selected + "\n\n")
@@ -367,6 +377,55 @@ func (m *Model) clearFilter() {
 	m.filter.SetValue("")
 	m.filter.Blur()
 	m.cursor = 0
+	m.listOffset = 0
+}
+func (m Model) listHeight() int {
+	if m.height <= 0 {
+		return len(m.visibleKeys())
+	}
+	fixedLines := 5 // title, path and spacing, footer and spacing
+	if m.loading {
+		fixedLines++
+	}
+	if m.err != nil {
+		fixedLines++
+	}
+	if m.status != "" {
+		fixedLines++
+	}
+	if m.mode == filtering || m.filter.Value() != "" {
+		fixedLines += 2
+	}
+	return max(1, m.height-fixedLines)
+}
+func (m Model) visibleRange(length int) (int, int) {
+	if length == 0 {
+		return 0, 0
+	}
+	start := min(m.listOffset, length-1)
+	return start, min(length, start+m.listHeight())
+}
+func (m *Model) ensureCursorVisible() {
+	length := len(m.visibleKeys())
+	if length == 0 {
+		m.cursor = 0
+		m.listOffset = 0
+		return
+	}
+	m.cursor = min(max(0, m.cursor), length-1)
+	height := max(1, m.listHeight())
+	if m.cursor < m.listOffset {
+		m.listOffset = m.cursor
+	} else if m.cursor >= m.listOffset+height {
+		m.listOffset = m.cursor - height + 1
+	}
+	m.listOffset = min(m.listOffset, max(0, length-height))
+}
+func (m Model) position(length int) string {
+	if length == 0 {
+		return "0/0"
+	}
+	return fmt.Sprintf("%d/%d", m.cursor+1, length)
 }
 func parent(value string) string {
 	parts := strings.Split(strings.TrimSuffix(value, "/"), "/")
