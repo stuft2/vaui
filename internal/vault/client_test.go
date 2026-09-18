@@ -69,7 +69,7 @@ func TestKVv2Operations(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := New(server.URL, "test-token", "team", "secret", false)
+	client, err := New(server.URL, "test-token", "team", []string{"secret"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestRestoreWritesPriorVersionAsNewData(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := New(server.URL, "token", "", "secret", false)
+	client, err := New(server.URL, "token", "", []string{"secret"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestVaultErrorMessage(t *testing.T) {
 		json.NewEncoder(w).Encode(map[string]any{"errors": []string{"permission denied"}})
 	}))
 	defer server.Close()
-	client, err := New(server.URL, "token", "", "secret", false)
+	client, err := New(server.URL, "token", "", []string{"secret"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestVaultErrorMessage(t *testing.T) {
 
 func TestNewRejectsInvalidAddress(t *testing.T) {
 	for _, address := range []string{"", "vault.local", "ftp://vault.local"} {
-		if _, err := New(address, "token", "", "secret", false); err == nil {
+		if _, err := New(address, "token", "", []string{"secret"}, false); err == nil {
 			t.Errorf("New(%q) succeeded", address)
 		}
 	}

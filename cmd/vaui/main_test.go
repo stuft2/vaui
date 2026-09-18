@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -62,22 +63,22 @@ func TestVaultLoginTokenReadError(t *testing.T) {
 	}
 }
 
-func TestDefaultMount(t *testing.T) {
+func TestDefaultMounts(t *testing.T) {
 	tests := []struct {
 		name   string
 		mounts string
-		want   string
+		want   []string
 	}{
-		{name: "default", want: "secret"},
-		{name: "single mount", mounts: "kvv2", want: "kvv2"},
-		{name: "first of multiple mounts", mounts: " kvv2, legacy ", want: "kvv2"},
+		{name: "default", want: []string{"secret"}},
+		{name: "single mount", mounts: "kvv2", want: []string{"kvv2"}},
+		{name: "multiple normalized mounts", mounts: " /kvv2/, legacy,kvv2 ", want: []string{"kvv2", "legacy"}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("VAULT_KV2_MOUNTS", tt.mounts)
-			if got := defaultMount(); got != tt.want {
-				t.Fatalf("defaultMount() = %q, want %q", got, tt.want)
+			if got := defaultMounts(); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("defaultMounts() = %q, want %q", got, tt.want)
 			}
 		})
 	}

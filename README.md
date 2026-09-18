@@ -20,9 +20,9 @@ vault login
 vaui
 ```
 
-VAUI uses `VAULT_TOKEN` when it is set; otherwise it reads the token saved by `vault login` in `~/.vault-token`. You can also pass `-token` explicitly. The default mount is `secret`. Override it with `-mount` or set `VAULT_KV2_MOUNTS`. When the variable contains multiple comma-separated mounts, VAUI uses the first one. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
+VAUI uses `VAULT_TOKEN` when it is set; otherwise it reads the token saved by `vault login` in `~/.vault-token`. You can also pass `-token` explicitly. The default mount is `secret`. Override it with `-mount` or set comma-separated mounts in `VAULT_KV2_MOUNTS`; VAUI prompts you to choose when more than one is configured. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
 
-Inside the UI, use the arrow keys to navigate, Enter to open a path or secret, `/` to filter entries in the current path, `a` to add, `e` to edit, `d` to delete, and `q` to quit. Filtering is case-insensitive; press Enter to apply it or Escape to clear it. Secret values are masked by default; select a field and press `r` to reveal or hide it, or `c` to copy its value.
+Inside the UI, use the arrow keys to navigate and Enter to open a path or secret. Press `g` to enter a path directly, `p` for recent paths, `m` to switch configured mounts, `/` to filter, `a` to add, and `q` to quit. Breadcrumbs show the current hierarchy; Backspace moves to its parent. Secret values are masked by default; select a field and press `r` to reveal or hide it, or `c` to copy its value.
 
 The structured editor supports adding, renaming, updating, and removing fields. Values use JSON syntax so their types remain explicit: for example, `"text"`, `42`, `true`, `null`, arrays, or objects. Press `j` from the structured editor to edit the entire secret as raw JSON. Save either editor with Ctrl+S.
 

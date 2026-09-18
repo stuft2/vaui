@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -27,6 +28,9 @@ type SecretStore interface {
 	Delete(context.Context, string) error
 	Undelete(context.Context, string, int) error
 	Destroy(context.Context, string, int) error
+	Mounts() []string
+	Mount() string
+	SelectMount(string) error
 }
 
 type mode int
@@ -43,6 +47,9 @@ const (
 	history
 	confirmRestore
 	confirmDestroy
+	directPath
+	recentPaths
+	mountPicker
 )
 
 type listMsg struct {
@@ -105,6 +112,9 @@ type Model struct {
 	filter         textinput.Model
 	destroyConfirm textinput.Model
 	copyValue      func(string) error
+	pathInput      textinput.Model
+	pickerCursor   int
+	recent         []string
 }
 
 var (
@@ -138,14 +148,26 @@ func New(secrets SecretStore) Model {
 	fieldValue.ShowLineNumbers = false
 	destroyConfirm := textinput.New()
 	destroyConfirm.Width = 60
-	return Model{
+	pathInput := textinput.New()
+	pathInput.Placeholder = "path/to/secrets"
+	pathInput.Width = 60
+	model := Model{
 		secrets: secrets, loading: true, editor: ed, name: name, filter: filter,
-		fieldName: fieldName, fieldValue: fieldValue, destroyConfirm: destroyConfirm,
+		fieldName: fieldName, fieldValue: fieldValue, destroyConfirm: destroyConfirm, pathInput: pathInput,
 		revealed: make(map[string]bool), copyValue: clipboard.WriteAll,
 	}
+	if len(secrets.Mounts()) > 1 {
+		model.mode, model.loading = mountPicker, false
+	}
+	return model
 }
 
-func (m Model) Init() tea.Cmd { return m.loadList() }
+func (m Model) Init() tea.Cmd {
+	if m.mode == mountPicker {
+		return nil
+	}
+	return m.loadList()
+}
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -161,6 +183,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		if msg.err == nil {
 			m.keys = msg.keys
+			m.visit(m.prefix)
 			visible := m.visibleKeys()
 			if m.cursor >= len(visible) {
 				m.cursor = max(0, len(visible)-1)
@@ -278,6 +301,21 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.name.CursorEnd()
 			m.name.Focus()
 			return m, textinput.Blink
+		case "g":
+			m.pathInput.SetValue(strings.TrimSuffix(m.prefix, "/"))
+			m.pathInput.Focus()
+			m.mode = directPath
+			return m, textinput.Blink
+		case "p":
+			if len(m.recent) > 0 {
+				m.pickerCursor = 0
+				m.mode = recentPaths
+			}
+		case "m":
+			if len(m.secrets.Mounts()) > 1 {
+				m.pickerCursor = 0
+				m.mode = mountPicker
+			}
 		}
 	case filtering:
 		switch key.String() {
@@ -517,6 +555,27 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.destroyConfirm, cmd = m.destroyConfirm.Update(key)
 			return m, cmd
 		}
+	case directPath:
+		if key.String() == "esc" {
+			m.pathInput.Blur()
+			m.mode = browse
+			return m, nil
+		}
+		if key.String() == "enter" {
+			m.pathInput.Blur()
+			m.prefix = normalizePath(m.pathInput.Value())
+			m.clearFilter()
+			m.loading = true
+			m.mode = browse
+			return m, m.loadList()
+		}
+		var cmd tea.Cmd
+		m.pathInput, cmd = m.pathInput.Update(key)
+		return m, cmd
+	case recentPaths:
+		return m.handlePicker(key, m.recent, false)
+	case mountPicker:
+		return m.handlePicker(key, m.secrets.Mounts(), true)
 	}
 	return m, nil
 }
@@ -543,7 +602,8 @@ func (m Model) View() string {
 		if m.prefix != "" {
 			location += m.prefix
 		}
-		b.WriteString("Path: " + location + "\n\n")
+		b.WriteString("Mount: " + m.secrets.Mount() + "\n")
+		b.WriteString("Path: " + breadcrumb(m.prefix) + "\n\n")
 		if m.mode == filtering {
 			b.WriteString("Filter: " + m.filter.View() + "\n\n")
 		} else if m.filter.Value() != "" {
@@ -573,7 +633,7 @@ func (m Model) View() string {
 		if m.mode == filtering {
 			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • type to filter • enter apply • esc clear", m.position(len(visible)))))
 		} else {
-			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • ↑/↓ navigate • enter open • / filter • backspace parent • a add • q quit", m.position(len(visible)))))
+			b.WriteString("\n" + dimStyle.Render(fmt.Sprintf("%s • ↑/↓ navigate • enter open • g go to • p recent • m mounts • backspace parent • a add • q quit", m.position(len(visible)))))
 		}
 	case view:
 		b.WriteString("\nSecret: " + m.selected)
@@ -673,6 +733,12 @@ func (m Model) View() string {
 		version, _ := m.selectedVersion()
 		b.WriteString(fmt.Sprintf("\nPermanently destroy version %d of %s? This cannot be undone.\n\nType %q and press enter:\n%s\n", version.Version, selectedStyle.Render(m.selected), fmt.Sprintf("destroy v%d", version.Version), m.destroyConfirm.View()))
 		b.WriteString(dimStyle.Render("esc cancel"))
+	case directPath:
+		b.WriteString("\nGo directly to path:\n" + m.pathInput.View() + "\n" + dimStyle.Render("enter open • esc cancel"))
+	case recentPaths:
+		b.WriteString(m.pickerView("Recent paths", m.recent))
+	case mountPicker:
+		b.WriteString(m.pickerView("Select mount", m.secrets.Mounts()))
 	}
 	return b.String()
 }
@@ -926,7 +992,7 @@ func (m Model) listHeight() int {
 	if m.height <= 0 {
 		return len(m.visibleKeys())
 	}
-	fixedLines := 5 // title, path and spacing, footer and spacing
+	fixedLines := 6 // title, mount, path and spacing, footer and spacing
 	if m.loading {
 		fixedLines++
 	}
@@ -976,6 +1042,81 @@ func parent(value string) string {
 		return ""
 	}
 	return strings.Join(parts[:len(parts)-1], "/") + "/"
+}
+
+func normalizePath(value string) string {
+	value = strings.Trim(strings.TrimSpace(value), "/")
+	if value == "" {
+		return ""
+	}
+	return path.Clean(value) + "/"
+}
+func breadcrumb(value string) string {
+	if value == "" {
+		return "/"
+	}
+	return "/ › " + strings.Join(strings.Split(strings.TrimSuffix(value, "/"), "/"), " › ")
+}
+func (m *Model) visit(path string) {
+	path = normalizePath(path)
+	if path == "" {
+		return
+	}
+	next := []string{path}
+	for _, old := range m.recent {
+		if old != path {
+			next = append(next, old)
+		}
+	}
+	if len(next) > 10 {
+		next = next[:10]
+	}
+	m.recent = next
+}
+func (m Model) handlePicker(key tea.KeyMsg, options []string, mounts bool) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "esc":
+		m.mode = browse
+	case "up", "k":
+		if m.pickerCursor > 0 {
+			m.pickerCursor--
+		}
+	case "down", "j":
+		if m.pickerCursor+1 < len(options) {
+			m.pickerCursor++
+		}
+	case "enter":
+		if len(options) > 0 {
+			if mounts {
+				if err := m.secrets.SelectMount(options[m.pickerCursor]); err != nil {
+					m.err = err
+					return m, nil
+				}
+				m.prefix = ""
+				m.recent = nil
+			} else {
+				m.prefix = options[m.pickerCursor]
+			}
+			m.clearFilter()
+			m.mode = browse
+			m.loading = true
+			return m, m.loadList()
+		}
+	}
+	return m, nil
+}
+func (m Model) pickerView(title string, options []string) string {
+	var b strings.Builder
+	b.WriteString("\n" + title + ":\n\n")
+	for i, v := range options {
+		marker := "  "
+		if i == m.pickerCursor {
+			marker = "> "
+		}
+		b.WriteString(marker + v + "\n")
+	}
+	b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter open • esc cancel"))
+	return b.String()
 }
 func min(a, b int) int {
 	if a < b {

@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stuft2/vaui/internal/secret"
@@ -22,21 +23,44 @@ type Client struct {
 	base      *url.URL
 	token     string
 	namespace string
+	mounts    []string
 	mount     string
+	mu        sync.RWMutex
 	http      *http.Client
 }
 
-func New(address, token, namespace, mount string, insecure bool) (*Client, error) {
+func New(address, token, namespace string, mounts []string, insecure bool) (*Client, error) {
 	base, err := url.Parse(address)
 	if err != nil || (base.Scheme != "http" && base.Scheme != "https") || base.Host == "" {
 		return nil, fmt.Errorf("invalid Vault address %q", address)
 	}
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecure} //nolint:gosec -- explicit CLI option
+	if len(mounts) == 0 {
+		return nil, fmt.Errorf("at least one KV v2 mount is required")
+	}
 	return &Client{
-		base: base, token: token, namespace: namespace, mount: strings.Trim(mount, "/"),
+		base: base, token: token, namespace: namespace, mounts: append([]string(nil), mounts...), mount: mounts[0],
 		http: &http.Client{Transport: transport, Timeout: 15 * time.Second},
 	}, nil
+}
+
+func (c *Client) Mounts() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return append([]string(nil), c.mounts...)
+}
+func (c *Client) Mount() string { c.mu.RLock(); defer c.mu.RUnlock(); return c.mount }
+func (c *Client) SelectMount(mount string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, candidate := range c.mounts {
+		if candidate == mount {
+			c.mount = mount
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown KV v2 mount %q", mount)
 }
 
 func (c *Client) List(ctx context.Context, prefix string) ([]string, error) {
@@ -149,7 +173,10 @@ func (c *Client) Destroy(ctx context.Context, name string, version int) error {
 
 func (c *Client) request(ctx context.Context, method, kind, name string, query map[string]string, body any, target any) error {
 	u := *c.base
-	u.Path = path.Join(c.base.Path, "v1", c.mount, kind, strings.Trim(name, "/"))
+	c.mu.RLock()
+	mount := c.mount
+	c.mu.RUnlock()
+	u.Path = path.Join(c.base.Path, "v1", mount, kind, strings.Trim(name, "/"))
 	q := u.Query()
 	for key, value := range query {
 		q.Set(key, value)
