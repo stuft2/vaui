@@ -52,7 +52,16 @@ func TestKVv2Operations(t *testing.T) {
 				t.Errorf("write body = %#v", body.Data)
 			}
 			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v1/secret/metadata/apps/a":
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/secret/data/apps/a":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodPost && (r.URL.Path == "/v1/secret/undelete/apps/a" || r.URL.Path == "/v1/secret/destroy/apps/a"):
+			var body struct {
+				Versions []int `json:"versions"`
+			}
+			json.NewDecoder(r.Body).Decode(&body)
+			if !reflect.DeepEqual(body.Versions, []int{2}) {
+				t.Errorf("versions body = %#v", body.Versions)
+			}
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unexpected request", http.StatusNotFound)
@@ -99,8 +108,18 @@ func TestKVv2Operations(t *testing.T) {
 	if err := client.Delete(ctx, "apps/a"); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.Undelete(ctx, "apps/a", 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Destroy(ctx, "apps/a", 2); err != nil {
+		t.Fatal(err)
+	}
 	if requests[0] != "GET /v1/secret/metadata/apps?list=true" {
 		t.Fatalf("list request = %q", requests[0])
+	}
+	wantTail := []string{"DELETE /v1/secret/data/apps/a", "POST /v1/secret/undelete/apps/a", "POST /v1/secret/destroy/apps/a"}
+	if !reflect.DeepEqual(requests[len(requests)-3:], wantTail) {
+		t.Fatalf("destructive requests = %#v, want %#v", requests[len(requests)-3:], wantTail)
 	}
 }
 

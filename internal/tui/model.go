@@ -25,6 +25,8 @@ type SecretStore interface {
 	Restore(context.Context, string, int) error
 	Write(context.Context, string, map[string]any) error
 	Delete(context.Context, string) error
+	Undelete(context.Context, string, int) error
+	Destroy(context.Context, string, int) error
 }
 
 type mode int
@@ -40,6 +42,7 @@ const (
 	confirmDelete
 	history
 	confirmRestore
+	confirmDestroy
 )
 
 type listMsg struct {
@@ -59,6 +62,10 @@ type metadataMsg struct {
 type restoreMsg struct {
 	version int
 	err     error
+}
+type versionActionMsg struct {
+	text string
+	err  error
 }
 type actionMsg struct {
 	text string
@@ -96,6 +103,7 @@ type Model struct {
 	editor         textarea.Model
 	name           textinput.Model
 	filter         textinput.Model
+	destroyConfirm textinput.Model
 	copyValue      func(string) error
 }
 
@@ -128,9 +136,11 @@ func New(secrets SecretStore) Model {
 	fieldValue.SetWidth(72)
 	fieldValue.SetHeight(8)
 	fieldValue.ShowLineNumbers = false
+	destroyConfirm := textinput.New()
+	destroyConfirm.Width = 60
 	return Model{
 		secrets: secrets, loading: true, editor: ed, name: name, filter: filter,
-		fieldName: fieldName, fieldValue: fieldValue,
+		fieldName: fieldName, fieldValue: fieldValue, destroyConfirm: destroyConfirm,
 		revealed: make(map[string]bool), copyValue: clipboard.WriteAll,
 	}
 }
@@ -184,6 +194,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = fmt.Sprintf("Restored version %d as a new version", msg.version)
 			m.loading = true
 			return m, m.loadSecret(m.selected, 0)
+		}
+	case versionActionMsg:
+		m.loading = false
+		m.err = msg.err
+		m.mode = history
+		if msg.err == nil {
+			m.status = msg.text
+			m.loading = true
+			return m, m.loadMetadata(m.selected)
 		}
 	case actionMsg:
 		m.loading = false
@@ -450,6 +469,19 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if version, ok := m.selectedVersion(); ok && !version.Destroyed && version.DeletionTime == nil {
 				m.mode = confirmRestore
 			}
+		case "u":
+			if version, ok := m.selectedVersion(); ok && !version.Destroyed && version.DeletionTime != nil {
+				m.loading = true
+				return m, m.undeleteSecret(m.selected, version.Version)
+			}
+		case "x":
+			if version, ok := m.selectedVersion(); ok && !version.Destroyed {
+				m.destroyConfirm.SetValue("")
+				m.destroyConfirm.Placeholder = fmt.Sprintf("destroy v%d", version.Version)
+				m.destroyConfirm.Focus()
+				m.mode = confirmDestroy
+				return m, textinput.Blink
+			}
 		}
 	case confirmRestore:
 		switch strings.ToLower(key.String()) {
@@ -460,6 +492,30 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		case "n", "esc":
 			m.mode = history
+		}
+	case confirmDestroy:
+		switch key.String() {
+		case "esc":
+			m.destroyConfirm.Blur()
+			m.mode = history
+		case "enter":
+			version, ok := m.selectedVersion()
+			if !ok {
+				m.mode = history
+				break
+			}
+			expected := fmt.Sprintf("destroy v%d", version.Version)
+			if m.destroyConfirm.Value() != expected {
+				m.err = fmt.Errorf("type %q exactly to confirm permanent destruction", expected)
+				return m, nil
+			}
+			m.destroyConfirm.Blur()
+			m.loading = true
+			return m, m.destroySecret(m.selected, version.Version)
+		default:
+			var cmd tea.Cmd
+			m.destroyConfirm, cmd = m.destroyConfirm.Update(key)
+			return m, cmd
 		}
 	}
 	return m, nil
@@ -584,7 +640,7 @@ func (m Model) View() string {
 		b.WriteString(m.name.View())
 		b.WriteString("\n" + dimStyle.Render("enter continue • esc cancel"))
 	case confirmDelete:
-		b.WriteString("\nDelete all versions and metadata for " + selectedStyle.Render(m.selected) + "? (y/N)")
+		b.WriteString("\nSoft-delete the current version of " + selectedStyle.Render(m.selected) + "? It can be undeleted from history. (y/N)")
 	case history:
 		b.WriteString("\nVersion history: " + m.selected + "\n\n")
 		if m.historyErr != nil {
@@ -596,9 +652,11 @@ func (m Model) View() string {
 					label += " • current"
 				}
 				if version.Destroyed {
-					label += " • destroyed"
+					label += " • permanently destroyed"
 				} else if version.DeletionTime != nil {
-					label += " • deleted"
+					label += " • soft-deleted"
+				} else {
+					label += " • active"
 				}
 				style := lipgloss.NewStyle()
 				if i == m.historyCursor {
@@ -607,10 +665,14 @@ func (m Model) View() string {
 				b.WriteString(style.Render(marker+label) + "\n")
 			}
 		}
-		b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter inspect • r restore • esc back"))
+		b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter inspect • r restore • u undelete • x permanently destroy • esc back"))
 	case confirmRestore:
 		version, _ := m.selectedVersion()
 		b.WriteString(fmt.Sprintf("\nRestore version %d of %s as a new current version? (y/N)", version.Version, selectedStyle.Render(m.selected)))
+	case confirmDestroy:
+		version, _ := m.selectedVersion()
+		b.WriteString(fmt.Sprintf("\nPermanently destroy version %d of %s? This cannot be undone.\n\nType %q and press enter:\n%s\n", version.Version, selectedStyle.Render(m.selected), fmt.Sprintf("destroy v%d", version.Version), m.destroyConfirm.View()))
+		b.WriteString(dimStyle.Render("esc cancel"))
 	}
 	return b.String()
 }
@@ -653,7 +715,28 @@ func formatTime(value time.Time) string { return value.Local().Format("2006-01-0
 func (m Model) deleteSecret(name string) tea.Cmd {
 	return func() tea.Msg {
 		err := m.secrets.Delete(context.Background(), name)
-		return actionMsg{"Deleted " + name, err}
+		if err != nil {
+			err = fmt.Errorf("soft-delete current version of %s: %w", name, err)
+		}
+		return versionActionMsg{"Soft-deleted current version of " + name, err}
+	}
+}
+func (m Model) undeleteSecret(name string, version int) tea.Cmd {
+	return func() tea.Msg {
+		err := m.secrets.Undelete(context.Background(), name, version)
+		if err != nil {
+			err = fmt.Errorf("undelete version %d of %s: %w", version, name, err)
+		}
+		return versionActionMsg{fmt.Sprintf("Undeleted version %d of %s", version, name), err}
+	}
+}
+func (m Model) destroySecret(name string, version int) tea.Cmd {
+	return func() tea.Msg {
+		err := m.secrets.Destroy(context.Background(), name, version)
+		if err != nil {
+			err = fmt.Errorf("permanently destroy version %d of %s: %w", version, name, err)
+		}
+		return versionActionMsg{fmt.Sprintf("Permanently destroyed version %d of %s", version, name), err}
 	}
 }
 func (m Model) copySelectedValue(key string) tea.Cmd {
