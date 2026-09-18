@@ -24,6 +24,7 @@ type mode int
 
 const (
 	browse mode = iota
+	filtering
 	view
 	edit
 	addName
@@ -58,6 +59,7 @@ type Model struct {
 	width, height int
 	editor        textarea.Model
 	name          textinput.Model
+	filter        textinput.Model
 }
 
 var (
@@ -76,7 +78,11 @@ func New(secrets SecretStore) Model {
 	name.Placeholder = "path/to/secret"
 	name.CharLimit = 512
 	name.Width = 60
-	return Model{secrets: secrets, loading: true, editor: ed, name: name}
+	filter := textinput.New()
+	filter.Placeholder = "filter current path"
+	filter.CharLimit = 256
+	filter.Width = 60
+	return Model{secrets: secrets, loading: true, editor: ed, name: name, filter: filter}
 }
 
 func (m Model) Init() tea.Cmd { return m.loadList() }
@@ -92,8 +98,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		if msg.err == nil {
 			m.keys = msg.keys
-			if m.cursor >= len(m.keys) {
-				m.cursor = max(0, len(m.keys)-1)
+			visible := m.visibleKeys()
+			if m.cursor >= len(visible) {
+				m.cursor = max(0, len(visible)-1)
 			}
 		}
 	case readMsg:
@@ -124,31 +131,38 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.status = ""
 	switch m.mode {
 	case browse:
+		visible := m.visibleKeys()
 		switch key.String() {
 		case "q":
 			return m, tea.Quit
+		case "/":
+			m.mode = filtering
+			m.filter.Focus()
+			return m, textinput.Blink
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 		case "down", "j":
-			if m.cursor+1 < len(m.keys) {
+			if m.cursor+1 < len(visible) {
 				m.cursor++
 			}
 		case "backspace", "h":
 			if m.prefix != "" {
 				m.prefix = parent(m.prefix)
+				m.clearFilter()
 				m.cursor = 0
 				m.loading = true
 				return m, m.loadList()
 			}
 		case "enter", "l", "v":
-			if len(m.keys) == 0 {
+			if len(visible) == 0 {
 				break
 			}
-			item := m.keys[m.cursor]
+			item := visible[m.cursor]
 			if strings.HasSuffix(item, "/") {
 				m.prefix += item
+				m.clearFilter()
 				m.cursor = 0
 				m.loading = true
 				return m, m.loadList()
@@ -162,6 +176,21 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.name.Focus()
 			return m, textinput.Blink
 		}
+	case filtering:
+		switch key.String() {
+		case "esc":
+			m.clearFilter()
+			m.mode = browse
+			return m, nil
+		case "enter":
+			m.filter.Blur()
+			m.mode = browse
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.filter, cmd = m.filter.Update(key)
+		m.cursor = 0
+		return m, cmd
 	case view:
 		switch key.String() {
 		case "esc", "q":
@@ -245,17 +274,27 @@ func (m Model) View() string {
 		b.WriteString("\n")
 	}
 	switch m.mode {
-	case browse:
+	case browse, filtering:
 		location := "/"
 		if m.prefix != "" {
 			location += m.prefix
 		}
 		b.WriteString("Path: " + location + "\n\n")
-		if len(m.keys) == 0 && !m.loading {
-			b.WriteString(dimStyle.Render("No secrets here."))
+		if m.mode == filtering {
+			b.WriteString("Filter: " + m.filter.View() + "\n\n")
+		} else if m.filter.Value() != "" {
+			b.WriteString("Filter: " + m.filter.Value() + "\n\n")
+		}
+		visible := m.visibleKeys()
+		if len(visible) == 0 && !m.loading {
+			emptyMessage := "No secrets here."
+			if m.filter.Value() != "" {
+				emptyMessage = "No matching paths."
+			}
+			b.WriteString(dimStyle.Render(emptyMessage))
 			b.WriteString("\n")
 		}
-		for i, key := range m.keys {
+		for i, key := range visible {
 			marker := "  "
 			style := lipgloss.NewStyle()
 			if i == m.cursor {
@@ -265,7 +304,11 @@ func (m Model) View() string {
 			b.WriteString(style.Render(marker + key))
 			b.WriteString("\n")
 		}
-		b.WriteString("\n" + dimStyle.Render("↑/↓ navigate • enter open • backspace parent • a add • q quit"))
+		if m.mode == filtering {
+			b.WriteString("\n" + dimStyle.Render("type to filter • enter apply • esc clear"))
+		} else {
+			b.WriteString("\n" + dimStyle.Render("↑/↓ navigate • enter open • / filter • backspace parent • a add • q quit"))
+		}
 	case view:
 		b.WriteString("\nSecret: " + m.selected + "\n\n")
 		raw, _ := json.MarshalIndent(m.data, "", "  ")
@@ -306,6 +349,24 @@ func (m Model) deleteSecret(name string) tea.Cmd {
 		err := m.secrets.Delete(context.Background(), name)
 		return actionMsg{"Deleted " + name, err}
 	}
+}
+func (m Model) visibleKeys() []string {
+	query := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+	if query == "" {
+		return m.keys
+	}
+	keys := make([]string, 0, len(m.keys))
+	for _, key := range m.keys {
+		if strings.Contains(strings.ToLower(key), query) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+func (m *Model) clearFilter() {
+	m.filter.SetValue("")
+	m.filter.Blur()
+	m.cursor = 0
 }
 func parent(value string) string {
 	parts := strings.Split(strings.TrimSuffix(value, "/"), "/")
