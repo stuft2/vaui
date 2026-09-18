@@ -219,3 +219,78 @@ func TestNewRejectsInvalidAddress(t *testing.T) {
 		}
 	}
 }
+
+func TestNewDiscoversAccessibleKVv2Mounts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/sys/internal/ui/mounts" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("X-Vault-Token"); got != "test-token" {
+			t.Errorf("token = %q", got)
+		}
+		if got := r.Header.Get("X-Vault-Namespace"); got != "team" {
+			t.Errorf("namespace = %q", got)
+		}
+		json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"secret": map[string]any{
+			"shared/": map[string]any{"type": "kv", "options": map[string]string{"version": "2"}},
+			"legacy/": map[string]any{"type": "kv", "options": map[string]string{"version": "1"}},
+			"apps/":   map[string]any{"type": "kv", "options": map[string]string{"version": "2"}},
+			"pki/":    map[string]any{"type": "pki"},
+		}}})
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "test-token", "team", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"apps", "shared"}; !reflect.DeepEqual(client.Mounts(), want) {
+		t.Fatalf("mounts = %q, want %q", client.Mounts(), want)
+	}
+	if client.Mount() != "apps" {
+		t.Fatalf("selected mount = %q, want apps", client.Mount())
+	}
+}
+
+func TestNewUsesConfiguredMountsWithoutDiscovery(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Fatal("unexpected discovery request")
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "token", "", []string{"configured"}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.Mount() != "configured" {
+		t.Fatalf("selected mount = %q", client.Mount())
+	}
+}
+
+func TestNewReturnsActionableDiscoveryErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   any
+		want   string
+	}{
+		{name: "request rejected", status: http.StatusForbidden, want: "detect KV v2 mounts"},
+		{name: "none visible", status: http.StatusOK, body: map[string]any{"data": map[string]any{"secret": map[string]any{}}}, want: "no accessible KV v2 mounts detected"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tt.status)
+				if tt.body != nil {
+					json.NewEncoder(w).Encode(tt.body)
+				}
+			}))
+			defer server.Close()
+
+			_, err := New(server.URL, "token", "", nil, false)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "-mount") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}

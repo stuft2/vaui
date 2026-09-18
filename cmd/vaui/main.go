@@ -75,7 +75,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func defaultMounts() []string { return parseMounts(env("VAULT_KV2_MOUNTS", "secret")) }
+func defaultMounts() []string { return parseMounts(os.Getenv("VAULT_KV2_MOUNTS")) }
 func parseMounts(value string) []string {
 	seen := map[string]bool{}
 	var mounts []string

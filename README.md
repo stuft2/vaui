@@ -31,7 +31,7 @@ Once VAUI opens:
 
 See the [interface guide](docs/interface-guide.md) for screen-by-screen shortcuts and recipes for adding, editing, restoring, and deleting secrets.
 
-The default mount is `secret`. Override it with `-mount` or set comma-separated mounts in `VAULT_KV2_MOUNTS`; VAUI prompts you to choose when more than one is configured. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
+When no mounts are configured, VAUI attempts to detect accessible KV v2 mounts through Vault's UI mount listing. Override this best-effort detection with `-mount` or set comma-separated mounts in `VAULT_KV2_MOUNTS`; VAUI prompts you to choose when more than one is available. If discovery is unavailable or finds no mounts, VAUI asks you to configure one explicitly. Use `-namespace` or `VAULT_NAMESPACE` for Vault Enterprise. Run `vaui -help` for all options.
 
 The token needs `list` access to `<mount>/metadata/*`, read/write access to `<mount>/data/*`, and delete access to `<mount>/metadata/*` for the corresponding operations.
 
