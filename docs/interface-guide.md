@@ -48,11 +48,11 @@ To edit an existing secret, open it and press `e`. The structured editor provide
 
 | Key | Action |
 | --- | --- |
-| `↑` / `↓` | Select a field |
+| `↑` / `↓` or `k` / `j` | Select a field |
 | Enter | Edit the selected field |
 | `a` | Add a field |
 | `d` | Remove the selected field from the draft |
-| `j` | Edit the entire secret as raw JSON |
+| `J` | Edit the entire secret as raw JSON |
 | Ctrl+S | Save the secret to Vault |
 | Escape | Cancel and return to the secret |
 

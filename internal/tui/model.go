@@ -392,7 +392,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.fieldCursor > 0 {
 				m.fieldCursor--
 			}
-		case "down":
+		case "down", "j":
 			if m.fieldCursor+1 < len(fields) {
 				m.fieldCursor++
 			}
@@ -409,7 +409,7 @@ func (m Model) handleKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				delete(m.draft, fields[m.fieldCursor])
 				m.fieldCursor = min(m.fieldCursor, max(0, len(fields)-2))
 			}
-		case "j":
+		case "J":
 			raw, _ := json.MarshalIndent(m.draft, "", "  ")
 			m.editor.SetValue(string(raw))
 			m.editor.Focus()
@@ -698,7 +698,7 @@ func (m Model) View() string {
 			b.WriteString(style.Render(fmt.Sprintf("%s%s: %s", marker, field, displayValue(m.draft[field]))))
 			b.WriteString("\n")
 		}
-		b.WriteString("\n" + dimStyle.Render("↑/↓ select • enter edit • a add • d remove • j raw JSON • ctrl+s save • esc cancel"))
+		b.WriteString("\n" + dimStyle.Render("↑/↓ or k/j select • enter edit • a add • d remove • J raw JSON • ctrl+s save • esc cancel"))
 	case editField:
 		b.WriteString("\nEdit field: " + m.selected + "\n\n")
 		b.WriteString("Name:\n" + m.fieldName.View() + "\n\n")
@@ -770,7 +770,7 @@ func (m Model) helpText(current mode) string {
 	case view:
 		controls = "↑/↓ select field • r reveal • c copy • e edit • h history • d soft-delete • esc back"
 	case editFields:
-		controls = "↑/↓ select • enter edit • a add • d remove • j raw JSON • ctrl+s save • esc cancel"
+		controls = "↑/↓ or k/j select • enter edit • a add • d remove • J raw JSON • ctrl+s save • esc cancel"
 	case editField:
 		controls = "tab switch input • ctrl+s apply • esc cancel"
 	case edit:

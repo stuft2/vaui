@@ -712,7 +712,7 @@ func TestRawJSONEditorPreservesAdvancedValues(t *testing.T) {
 	model.data = map[string]any{"nested": map[string]any{"items": []any{"one", float64(2)}}}
 
 	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
 	if model.mode != edit {
 		t.Fatalf("raw editor mode = %v, want edit", model.mode)
 	}
@@ -720,7 +720,7 @@ func TestRawJSONEditorPreservesAdvancedValues(t *testing.T) {
 	if model.mode != editFields {
 		t.Fatalf("raw editor escape mode = %v, want structured editor", model.mode)
 	}
-	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
 	model.editor.SetValue(`{"enabled":true,"count":2,"nested":{"items":["one",2]}}`)
 	model, cmd := updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyCtrlS})
 	if cmd == nil {
@@ -734,6 +734,21 @@ func TestRawJSONEditorPreservesAdvancedValues(t *testing.T) {
 	}
 	if !reflect.DeepEqual(store.writtenData, want) {
 		t.Fatalf("raw JSON save = %#v, want %#v", store.writtenData, want)
+	}
+}
+
+func TestStructuredEditorUsesVimDownKey(t *testing.T) {
+	model := New(&fakeSecretStore{})
+	model.mode = editFields
+	model.draft = map[string]any{"first": "one", "second": "two"}
+
+	model, _ = updateWithKey(t, model, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+
+	if model.fieldCursor != 1 {
+		t.Fatalf("field cursor = %d, want 1", model.fieldCursor)
+	}
+	if model.mode != editFields {
+		t.Fatalf("mode = %v, want structured editor", model.mode)
 	}
 }
 
